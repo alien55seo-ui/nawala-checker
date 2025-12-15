@@ -163,13 +163,11 @@ def main():
     lines = ["Domain Status Report (ninjamvp.asia)"]
 
     for d in domains:
-        status_text, ket_text = results.get(d.lower(), ("Unknown", ""))
-        emoji, label = normalize_status(status_text)
+    status_text, _ = results.get(d.lower(), ("Unknown", ""))
+    emoji, label = normalize_status(status_text)
 
-        if ket_text:
-            lines.append(f"{d}: {emoji} {label} — {ket_text}")
-        else:
-            lines.append(f"{d}: {emoji} {label}")
+    lines.append(f"{d}: {emoji} {label}")
+
 
     send_telegram("\n".join(lines))
 
