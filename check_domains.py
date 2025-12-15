@@ -1,12 +1,12 @@
 import os
 import requests
 
-from time import sleep
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
+VERSION = "ninjamvp-no-keterangan-v1"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -65,9 +65,11 @@ def normalize_status(status_text: str):
     if not t:
         return "⚪", "Unknown"
 
+    # Aman = tidak terblokir
     if "aman" in t or "tidak terblokir" in t or "not blocked" in t:
         return "🟢", "Not Blocked"
 
+    # Nawala / Terblokir
     if "nawala" in t or "terblokir" in t or "blocked" in t:
         return "🔴", "Blocked"
 
@@ -77,13 +79,11 @@ def normalize_status(status_text: str):
 def check_domains_ninjamvp(driver, domains):
     """
     Return: dict domain_lower -> status_text
-    (kolom keterangan sengaja diabaikan)
+    (kolom Keterangan sengaja TIDAK dipakai)
     """
     driver.get(TARGET_URL)
 
-    WebDriverWait(driver, 30).until(
-        lambda d: d.find_element(By.TAG_NAME, "body")
-    )
+    WebDriverWait(driver, 30).until(lambda d: d.find_element(By.TAG_NAME, "body"))
 
     textarea = driver.find_element(By.CSS_SELECTOR, "textarea#domainsInput")
     textarea.clear()
@@ -92,7 +92,7 @@ def check_domains_ninjamvp(driver, domains):
     btn = driver.find_element(By.CSS_SELECTOR, "button#scanBtn")
     btn.click()
 
-    # tunggu sampai tabel hasil muncul (minimal 1 row)
+    # tunggu sampai tabel hasil muncul minimal 1 baris
     WebDriverWait(driver, 60).until(
         lambda d: len(d.find_elements(By.CSS_SELECTOR, "div.table-card table tbody tr")) > 0
     )
@@ -106,7 +106,7 @@ def check_domains_ninjamvp(driver, domains):
             continue
 
         domain_cell = tds[0].text.strip().lower()
-        status_cell = tds[1].text.strip()
+        status_cell = tds[1].text.strip()  # HANYA status (kolom ke-2)
 
         results[domain_cell] = status_cell
 
@@ -114,11 +114,11 @@ def check_domains_ninjamvp(driver, domains):
 
 
 def main():
-    print("=== DOMAIN CHECKER (ninjamvp.asia) ===", flush=True)
+    print(f"=== DOMAIN CHECKER (ninjamvp.asia) | {VERSION} ===", flush=True)
 
     domains = load_domains()
     if not domains:
-        send_telegram("Domain Status Report (ninjamvp.asia)\nTidak ada domain untuk dicek.")
+        send_telegram(f"Domain Status Report (ninjamvp.asia) [{VERSION}]\nTidak ada domain untuk dicek.")
         return
 
     # UI ninjamvp biasanya max 50 domain per scan
@@ -127,6 +127,7 @@ def main():
         print("Info: domain > 50, hanya 50 pertama yang dicek.", flush=True)
 
     driver = setup_driver()
+
     try:
         results = check_domains_ninjamvp(driver, domains)
     except Exception as e:
@@ -134,7 +135,8 @@ def main():
             driver.quit()
         except Exception:
             pass
-        err_msg = f"❌ Gagal cek domain (ninjamvp.asia): {e}"
+
+        err_msg = f"❌ Gagal cek domain (ninjamvp.asia) [{VERSION}]: {e}"
         print(err_msg, flush=True)
         send_telegram(err_msg)
         return
@@ -144,7 +146,7 @@ def main():
     except Exception:
         pass
 
-    lines = ["Domain Status Report (ninjamvp.asia)"]
+    lines = [f"Domain Status Report (ninjamvp.asia) [{VERSION}]"]
 
     for d in domains:
         status_text = results.get(d.lower(), "Unknown")
