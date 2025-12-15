@@ -16,7 +16,7 @@ TARGET_URL = "https://www.ninjamvp.asia/"
 
 
 def send_telegram(text: str):
-    """Kirim pesan ke Telegram (plain text agar aman dari error HTML entity)."""
+    """Kirim pesan ke Telegram (plain text)."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram env belum di-set")
         return
@@ -26,8 +26,8 @@ def send_telegram(text: str):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "disable_web_page_preview": True,
-        # jangan pakai parse_mode HTML agar <unknown> tidak bikin error
     }
+
     try:
         resp = requests.post(url, json=payload, timeout=15)
         print("Telegram resp:", resp.status_code, resp.text[:200])
@@ -60,46 +60,35 @@ def load_domains():
 
 
 def normalize_status(status_text: str):
-    """
-    Ninjamvp menampilkan status seperti: 'Aman' atau 'Nawala' / 'Terblokir' (bisa beda-beda).
-    Kita normalisasi jadi emoji + label.
-    """
     t = (status_text or "").strip().lower()
 
     if not t:
         return "⚪", "Unknown"
 
-    # Aman = tidak terblokir
     if "aman" in t or "tidak terblokir" in t or "not blocked" in t:
         return "🟢", "Not Blocked"
 
-    # Nawala / Terblokir
     if "nawala" in t or "terblokir" in t or "blocked" in t:
         return "🔴", "Blocked"
 
-    # fallback
-    return "⚪", status_text.strip()
+    return "⚪", (status_text or "").strip() or "Unknown"
 
 
 def check_domains_ninjamvp(driver, domains):
     """
-    Isi textarea#domainsInput, klik button#scanBtn,
-    lalu baca tabel hasil di div.table-card.
-    Return: dict domain_lower -> (status_text, keterangan_text)
+    Return: dict domain_lower -> status_text
+    (kolom keterangan sengaja diabaikan)
     """
     driver.get(TARGET_URL)
 
-    # tunggu body siap
     WebDriverWait(driver, 30).until(
         lambda d: d.find_element(By.TAG_NAME, "body")
     )
 
-    # isi textarea yang benar
     textarea = driver.find_element(By.CSS_SELECTOR, "textarea#domainsInput")
     textarea.clear()
     textarea.send_keys("\n".join(domains))
 
-    # klik tombol submit yang benar
     btn = driver.find_element(By.CSS_SELECTOR, "button#scanBtn")
     btn.click()
 
@@ -119,10 +108,7 @@ def check_domains_ninjamvp(driver, domains):
         domain_cell = tds[0].text.strip().lower()
         status_cell = tds[1].text.strip()
 
-        # beberapa tabel punya kolom "Keterangan" (seperti screenshot kamu)
-        ket_cell = tds[2].text.strip() if len(tds) >= 3 else ""
-
-        results[domain_cell] = (status_cell, ket_cell)
+        results[domain_cell] = status_cell
 
     return results
 
@@ -132,16 +118,15 @@ def main():
 
     domains = load_domains()
     if not domains:
-        send_telegram("Domain Status Report\nTidak ada domain untuk dicek.")
+        send_telegram("Domain Status Report (ninjamvp.asia)\nTidak ada domain untuk dicek.")
         return
 
-    # dari UI tertulis maksimal 50 domain / scan
+    # UI ninjamvp biasanya max 50 domain per scan
     if len(domains) > 50:
         domains = domains[:50]
         print("Info: domain > 50, hanya 50 pertama yang dicek.", flush=True)
 
     driver = setup_driver()
-
     try:
         results = check_domains_ninjamvp(driver, domains)
     except Exception as e:
@@ -149,7 +134,6 @@ def main():
             driver.quit()
         except Exception:
             pass
-
         err_msg = f"❌ Gagal cek domain (ninjamvp.asia): {e}"
         print(err_msg, flush=True)
         send_telegram(err_msg)
@@ -163,11 +147,9 @@ def main():
     lines = ["Domain Status Report (ninjamvp.asia)"]
 
     for d in domains:
-    status_text, _ = results.get(d.lower(), ("Unknown", ""))
-    emoji, label = normalize_status(status_text)
-
-    lines.append(f"{d}: {emoji} {label}")
-
+        status_text = results.get(d.lower(), "Unknown")
+        emoji, label = normalize_status(status_text)
+        lines.append(f"{d}: {emoji} {label}")
 
     send_telegram("\n".join(lines))
 
