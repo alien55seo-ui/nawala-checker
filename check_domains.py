@@ -98,7 +98,7 @@ def check_multiple_domains(driver, domains):
     klik 'Check Domains', lalu baca tabel hasil (per-domain).
     Mengembalikan dict: {domain_lower: status_text}
     """
-    driver.get("https://nawalacheck.skiddle.id/")
+    driver.get("https://www.ninjamvp.asia/")
     sleep(3)
 
     # textarea domain
