@@ -1,15 +1,13 @@
 # check_domains.py
-# FINAL — trustpositif.cc (Selenium)
+# FINAL CLEAN VERSION — trustpositif.cc
 # Env:
-#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DOMAINS_TO_CHECK
+#   TELEGRAM_TOKEN
+#   TELEGRAM_CHAT_ID
+#   DOMAINS_TO_CHECK   (pisah koma atau enter)
 # Optional:
 #   TARGET_URL (default https://trustpositif.cc/)
-#
-# DOMAINS_TO_CHECK format: dipisah koma atau enter
-# contoh: pk95anomali.space, rtpbetx400.store, boxing55d.pro
 
 import os
-import re
 import requests
 from time import sleep
 from typing import Dict, List, Tuple
@@ -21,13 +19,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-VERSION = "trustpositif-cc-final-v1"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DOMAINS_ENV = os.environ.get("DOMAINS_TO_CHECK", "")
-
-TARGET_URL = os.environ.get("TARGET_URL", "https://trustpositif.cc/").strip() or "https://trustpositif.cc/"
+TARGET_URL = os.environ.get("TARGET_URL", "https://trustpositif.cc/")
 
 
 # ================= TELEGRAM =================
@@ -42,28 +38,27 @@ def send_telegram(text: str) -> None:
         "text": text,
         "disable_web_page_preview": True,
     }
+
     try:
-        r = requests.post(url, json=payload, timeout=25)
-        print("Telegram resp:", r.status_code, r.text[:200], flush=True)
+        requests.post(url, json=payload, timeout=25)
     except Exception as e:
         print("Gagal kirim Telegram:", e, flush=True)
 
 
-# ================= DOMAIN HELPERS =================
+# ================= DOMAIN =================
 def load_domains() -> List[str]:
     raw = (DOMAINS_ENV or "").strip()
     if not raw:
         return []
+
     raw = raw.replace("\n", ",")
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
-    out: List[str] = []
+    out = []
     for d in parts:
-        x = d.strip()
-        x = x.replace("https://", "").replace("http://", "")
-        x = x.strip().strip("/")
+        x = d.replace("https://", "").replace("http://", "").strip().strip("/")
         if x:
-            out.append(x)
+            out.append(x.lower())
     return out
 
 
@@ -72,29 +67,21 @@ def chunk(lst: List[str], n: int):
         yield lst[i : i + n]
 
 
-def normalize_status(raw_status: str) -> Tuple[str, str]:
-    """
-    trustpositif.cc status di tabel: "Aman", "Terblokir", bisa juga "Error"
-    """
-    t = (raw_status or "").strip().lower()
+def normalize_status(raw: str) -> Tuple[str, str]:
+    t = (raw or "").lower()
 
-    if not t:
-        return "⚪", "Unknown"
-
-    if "aman" in t or "not blocked" in t:
+    if "aman" in t:
         return "🟢", "Not Blocked"
-
-    if "terblokir" in t or "blocked" in t or "nawala" in t:
+    if "terblokir" in t:
         return "🔴", "Blocked"
-
-    if "error" in t or "gagal" in t:
+    if "error" in t:
         return "🟠", "Error"
 
-    return "⚪", raw_status.strip()
+    return "⚪", "Unknown"
 
 
 # ================= SELENIUM =================
-def setup_driver() -> webdriver.Chrome:
+def setup_driver():
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
@@ -102,8 +89,6 @@ def setup_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=id-ID")
-
-    # UA "normal" biar lebih aman
     opts.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
     )
@@ -113,67 +98,43 @@ def setup_driver() -> webdriver.Chrome:
     return driver
 
 
-def find_textarea(wait: WebDriverWait):
-    # Dari screenshot: textarea besar di tengah (biasanya cuma satu).
-    # Kita cari yang paling besar/utama.
+def find_textarea(wait):
     tas = wait.until(lambda d: d.find_elements(By.TAG_NAME, "textarea"))
     if not tas:
-        raise RuntimeError("Textarea input domain tidak ditemukan")
-    # pilih textarea pertama (umumnya benar)
+        raise RuntimeError("Textarea tidak ditemukan")
     return tas[0]
 
 
-def click_submit(wait: WebDriverWait, driver: webdriver.Chrome):
-    # Tombol di UI: "Cek Sekarang - Gratis!" atau sejenis.
-    # Kita cari button yang mengandung kata "Cek" atau "Gratis" atau "Sekarang".
-    xpaths = [
-        "//button[contains(., 'Cek Sekarang')]",
-        "//button[contains(., 'Cek')]",
-        "//button[contains(., 'Gratis')]",
-    ]
-    for xp in xpaths:
-        try:
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
-            driver.execute_script("arguments[0].click();", btn)
-            return
-        except Exception:
-            pass
-    raise RuntimeError("Tombol submit (Cek Sekarang) tidak ditemukan")
+def click_submit(wait, driver):
+    btn = wait.until(
+        EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Cek')]"))
+    )
+    driver.execute_script("arguments[0].click();", btn)
 
 
-def wait_results_table(wait: WebDriverWait):
-    # Setelah submit, akan muncul tabel hasil (kolom: No, Domain, Status, dst)
-    # Cari tbody tr minimal 1 row
+def wait_results(wait):
     wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0)
 
 
-def parse_table(driver: webdriver.Chrome) -> Dict[str, str]:
-    """
-    Return: dict domain_lower -> status_raw_text
-    """
+def parse_table(driver) -> Dict[str, str]:
     rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-    out: Dict[str, str] = {}
+    out = {}
 
     for row in rows:
         tds = row.find_elements(By.TAG_NAME, "td")
-        # biasanya: [No, Domain, Status, Waktu Cek, Kecepatan]
-        if len(tds) < 3:
-            continue
-
-        domain = tds[1].text.strip().lower()
-        status = tds[2].text.strip()
-
-        if domain:
-            out[domain] = status
+        if len(tds) >= 3:
+            domain = tds[1].text.strip().lower()
+            status = tds[2].text.strip()
+            if domain:
+                out[domain] = status
 
     return out
 
 
-def check_batch(driver: webdriver.Chrome, domains: List[str]) -> Dict[str, str]:
+def check_batch(driver, domains: List[str]) -> Dict[str, str]:
     wait = WebDriverWait(driver, 45)
-    driver.get(TARGET_URL)
 
-    # pastikan body siap
+    driver.get(TARGET_URL)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
     textarea = find_textarea(wait)
@@ -181,73 +142,46 @@ def check_batch(driver: webdriver.Chrome, domains: List[str]) -> Dict[str, str]:
     textarea.send_keys("\n".join(domains))
 
     click_submit(wait, driver)
+    wait_results(WebDriverWait(driver, 80))
 
-    # tunggu hasil
-    wait_results_table(WebDriverWait(driver, 80))
-
-    # parse tabel
     return parse_table(driver)
 
 
 # ================= MAIN =================
 def main():
-    send_telegram(f"✅ RUNNING TRUSTPOSITIF.CC VERSION [{VERSION}]")
-
     domains = load_domains()
     if not domains:
-        send_telegram(f"Domain Status Report (trustpositif.cc) [{VERSION}]\nTidak ada domain untuk dicek.")
+        send_telegram("Tidak ada domain untuk dicek.")
         return
-
-    # UI menunjukkan max 100 domain
-    batches = list(chunk(domains, 100))
 
     driver = setup_driver()
-    all_results: Dict[str, str] = {}
+    results = {}
 
     try:
-        for i, batch in enumerate(batches, start=1):
-            print(f"Checking batch {i}/{len(batches)}: {len(batch)} domains", flush=True)
+        for batch in chunk(domains, 100):
             res = check_batch(driver, batch)
-            all_results.update(res)
-
-            # jeda kecil biar stabil
-            sleep(1.5)
+            results.update(res)
+            sleep(1.2)
 
     except TimeoutException:
-        msg = (
-            f"❌ Timeout (trustpositif.cc) [{VERSION}]\n"
-            f"URL: {driver.current_url}\n"
-            f"Title: {driver.title}"
-        )
-        print(msg, flush=True)
-        send_telegram(msg)
+        send_telegram("❌ Timeout saat cek trustpositif.cc")
         return
-
     except Exception as e:
-        msg = (
-            f"❌ Error (trustpositif.cc) [{VERSION}]\n"
-            f"{type(e).__name__}: {e}\n"
-            f"URL: {driver.current_url}\n"
-            f"Title: {driver.title}"
-        )
-        print(msg, flush=True)
-        send_telegram(msg)
+        send_telegram(f"❌ Error: {type(e).__name__} - {e}")
         return
-
     finally:
         try:
             driver.quit()
         except Exception:
             pass
 
-    # Susun laporan (tanpa “keterangan” tambahan)
-    lines = [f"Domain Status Report (trustpositif.cc) [{VERSION}]"]
+    # Susun laporan final
+    lines = ["Domain Status Report (trustpositif.cc)"]
 
     for d in domains:
-        key = d.lower()
-        raw_status = all_results.get(key, "")
-        emoji, label = normalize_status(raw_status)
-        lines.append(f"{key}: {emoji} {label}")
+        raw = results.get(d, "")
+        emoji, label = normalize_status(raw)
+        lines.append(f"{d}: {emoji} {label}")
 
     send_telegram("\n".join(lines))
 
