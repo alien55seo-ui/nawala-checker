@@ -1,9 +1,9 @@
 import os
 import json
 import requests
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "nawala-asia-api-final-v2"
+VERSION = "nawala-asia-api-final-v3"
 
 API_URL = "https://ukvsutaqqtjsebnkdmmt.supabase.co/functions/v1/check-domains"
 
@@ -11,21 +11,17 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DOMAINS_ENV = os.environ.get("DOMAINS_TO_CHECK", "")
 
-# Optional: kalau suatu saat endpoint butuh key, isi env ini
+# WAJIB: isi dengan key dari header apikey/authorization (sama persis)
 NAWALA_API_KEY = os.environ.get("NAWALA_API_KEY", "").strip()
 
 
-def send_telegram(text: str):
+# ----------------- TELEGRAM -----------------
+def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram env belum di-set", flush=True)
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
     try:
         r = requests.post(url, json=payload, timeout=20)
         print("Telegram resp:", r.status_code, r.text[:200], flush=True)
@@ -33,6 +29,7 @@ def send_telegram(text: str):
         print("Gagal kirim Telegram:", e, flush=True)
 
 
+# ----------------- DOMAINS -----------------
 def load_domains() -> List[str]:
     raw = (DOMAINS_ENV or "").strip()
     if not raw:
@@ -41,7 +38,6 @@ def load_domains() -> List[str]:
     raw = raw.replace("\n", ",")
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
-    # normalisasi domain (hapus http/https dan slash)
     out: List[str] = []
     for d in parts:
         x = d.replace("https://", "").replace("http://", "").strip().strip("/")
@@ -50,132 +46,125 @@ def load_domains() -> List[str]:
     return out
 
 
+# ----------------- API CALL -----------------
 def build_headers() -> Dict[str, str]:
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Origin": "https://www.nawala.asia",
-        "Referer": "https://www.nawala.asia/",
-        "User-Agent": "Mozilla/5.0",
+    # Header minimal yang penting + key supabase
+    return {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "origin": "https://www.nawala.asia",
+        "referer": "https://www.nawala.asia/",
+        "user-agent": "Mozilla/5.0",
+        "apikey": NAWALA_API_KEY,
+        "authorization": f"Bearer {NAWALA_API_KEY}",
     }
-    if NAWALA_API_KEY:
-        headers["Authorization"] = f"Bearer {NAWALA_API_KEY}"
-        headers["apikey"] = NAWALA_API_KEY
-    return headers
 
 
-def call_api(domains: List[str]) -> Tuple[bool, str, Any]:
-    """
-    ✅ FORMAT WAJIB dari API ini:
-    {
-      "data": "domain1.com\ndomain2.com\n..."
-    }
-    """
+def post_json(payload: Dict[str, Any]) -> Tuple[int, str, Optional[Any]]:
     headers = build_headers()
-    payload = {"data": "\n".join(domains)}
-
     try:
         r = requests.post(API_URL, headers=headers, json=payload, timeout=45)
     except Exception as e:
-        return False, f"Request error: {type(e).__name__}: {e}", None
+        return 0, f"Request error: {type(e).__name__}: {e}", None
 
+    txt = r.text or ""
     if r.status_code != 200:
-        return False, f"HTTP {r.status_code}: {r.text[:500]}", None
+        return r.status_code, txt[:600], None
 
-    ct = (r.headers.get("content-type") or "").lower()
-    if "application/json" not in ct:
-        return False, f"Non-JSON response: {r.text[:500]}", None
-
+    # try json
     try:
-        return True, "OK", r.json()
-    except Exception as e:
-        return False, f"JSON parse error: {type(e).__name__}: {e} | body={r.text[:500]}", None
+        return r.status_code, txt[:600], r.json()
+    except Exception:
+        return r.status_code, txt[:600], None
 
 
-def extract_results(data: Any) -> Dict[str, str]:
+def call_api(domains: List[str]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
-    Coba parse berbagai bentuk response yang umum:
-    - {"success":true,"results":[{"domain":"x","nawala":"Active"}...]}
-    - {"results":[...]}
-    - [{"domain":"x","nawala":"Active"}...]
+    Karena payload request asli belum kelihatan (yang kamu kirim body-nya seperti response),
+    kita coba beberapa format input yang umum untuk edge function ini.
+
+    API harus balas JSON dengan {"success": true, "data": [...]}
     """
-    results: Dict[str, str] = {}
+    candidates = [
+        {"domains": domains},
+        {"data": domains},
+        {"domains": "\n".join(domains)},
+        {"data": "\n".join(domains)},
+        {"items": domains},
+        {"list": domains},
+    ]
 
-    def norm(s: str) -> str:
-        t = (s or "").strip().lower()
-        if "blocked" in t or "terblok" in t or "nawala" in t and "active" not in t:
-            return "blocked"
-        if "active" in t or "aman" in t or "not blocked" in t or "tidak terblok" in t:
-            return "active"
-        return t or "unknown"
+    last_info = ""
+    for i, payload in enumerate(candidates, start=1):
+        code, preview, data = post_json(payload)
+        last_info = f"try#{i} HTTP {code} preview={preview}"
 
-    def get_domain(it: Dict[str, Any]) -> str:
-        return (it.get("domain") or it.get("host") or it.get("url") or "").strip().lower()
+        if isinstance(data, dict) and data.get("success") is True and isinstance(data.get("data"), list):
+            return True, f"OK (payload try#{i})", data
 
-    def get_status(it: Dict[str, Any]) -> str:
-        # prioritas field yang biasanya ada
-        for k in ["nawala", "nawala_status", "status_nawala", "status", "result"]:
-            if k in it and isinstance(it[k], (str, int, float)):
-                return norm(str(it[k]))
+        # beberapa server tidak pakai "success", tapi langsung "data"
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            return True, f"OK (payload try#{i}, no success flag)", data
 
-        # nested object
-        for k in ["nawala", "network"]:
-            if k in it and isinstance(it[k], dict):
-                for kk in ["status", "result", "state"]:
-                    if kk in it[k]:
-                        return norm(str(it[k][kk]))
-
-        return "unknown"
-
-    # list
-    if isinstance(data, list):
-        for it in data:
-            if isinstance(it, dict):
-                dom = get_domain(it)
-                if dom:
-                    results[dom] = get_status(it)
-        return results
-
-    # dict
-    if isinstance(data, dict):
-        items = None
-        if isinstance(data.get("results"), list):
-            items = data["results"]
-        elif isinstance(data.get("data"), list):
-            items = data["data"]
-
-        if isinstance(items, list):
-            for it in items:
-                if isinstance(it, dict):
-                    dom = get_domain(it)
-                    if dom:
-                        results[dom] = get_status(it)
-            return results
-
-        # fallback: dict keyed by domain
-        for k, v in data.items():
-            if isinstance(k, str) and "." in k:
-                dom = k.strip().lower()
-                if isinstance(v, str):
-                    results[dom] = norm(v)
-                elif isinstance(v, dict):
-                    results[dom] = get_status(v)
-        return results
-
-    return results
+    return False, last_info, None
 
 
-def status_to_emoji_label(status: str) -> Tuple[str, str]:
-    s = (status or "").lower()
-    if "blocked" in s:
+# ----------------- PARSE RESULT -----------------
+def status_to_emoji_label(blocked: Optional[bool]) -> Tuple[str, str]:
+    if blocked is True:
         return "🔴", "Blocked"
-    if "active" in s:
+    if blocked is False:
         return "🟢", "Not Blocked"
     return "⚪", "Unknown"
 
 
-def main():
+def parse_results(api_json: Dict[str, Any]) -> Dict[str, Dict[str, Optional[bool]]]:
+    """
+    Expected response (dari cURL kamu):
+      {"success":true,"data":[{"domain":"x","nawala":{"blocked":false},"network":{"blocked":false}}]}
+    Return:
+      { "x": {"nawala": False, "network": False}, ... }
+    """
+    out: Dict[str, Dict[str, Optional[bool]]] = {}
+    items = api_json.get("data", [])
+    if not isinstance(items, list):
+        return out
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        dom = (it.get("domain") or "").strip().lower()
+        if not dom:
+            continue
+
+        nawala_blocked = None
+        network_blocked = None
+
+        n = it.get("nawala")
+        if isinstance(n, dict):
+            if "blocked" in n:
+                nawala_blocked = bool(n["blocked"])
+
+        nw = it.get("network")
+        if isinstance(nw, dict):
+            if "blocked" in nw:
+                network_blocked = bool(nw["blocked"])
+
+        out[dom] = {"nawala": nawala_blocked, "network": network_blocked}
+
+    return out
+
+
+# ----------------- MAIN -----------------
+def main() -> None:
     send_telegram(f"✅ RUNNING NAWALA.ASIA API VERSION [{VERSION}]")
+
+    if not NAWALA_API_KEY:
+        send_telegram(
+            f"❌ NAWALA_API_KEY belum di-set [{VERSION}]\n"
+            f"Set env NAWALA_API_KEY = apikey/authorization dari Network."
+        )
+        return
 
     domains = load_domains()
     if not domains:
@@ -183,36 +172,37 @@ def main():
         return
 
     ok, info, data = call_api(domains)
-    if not ok:
+    if not ok or not data:
         send_telegram(
             f"❌ Gagal call API [{VERSION}]\n"
             f"Endpoint: {API_URL}\n"
             f"Info: {info}\n"
-            f"Hint: Jika butuh key, set NAWALA_API_KEY."
+            f"Catatan: Pastikan NAWALA_API_KEY benar, dan payload cocok."
         )
         return
 
-    results = extract_results(data)
+    results = parse_results(data)
     if not results:
-        preview = ""
-        try:
-            preview = json.dumps(data, ensure_ascii=False)[:900]
-        except Exception:
-            preview = str(data)[:900]
-
+        preview = json.dumps(data, ensure_ascii=False)[:900]
         send_telegram(
-            f"⚠️ API OK tapi hasil tidak bisa diparse [{VERSION}]\n"
+            f"⚠️ API OK tapi hasil kosong/tidak ter-parse [{VERSION}]\n"
             f"{info}\n"
             f"Response preview:\n{preview}"
         )
         return
 
     lines = [f"Domain Status Report (nawala.asia API) [{VERSION}]"]
+
     for d in domains:
         key = d.lower()
-        st = results.get(key, "unknown")
-        emoji, label = status_to_emoji_label(st)
-        lines.append(f"{key}: {emoji} {label}")
+        item = results.get(key, {"nawala": None, "network": None})
+
+        e1, l1 = status_to_emoji_label(item.get("nawala"))
+        e2, l2 = status_to_emoji_label(item.get("network"))
+
+        # kamu bisa pilih tampilkan hanya Nawala atau dua-duanya.
+        # Di sini saya tampilkan dua status biar jelas:
+        lines.append(f"{key}: Nawala {e1} {l1} | Network {e2} {l2}")
 
     send_telegram("\n".join(lines))
 
