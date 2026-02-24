@@ -9,8 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-
-VERSION = "nawala-asia-final-v1"
+VERSION = "nawala-asia-final-v2"
 TARGET_URL = "https://www.nawala.asia/"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -18,7 +17,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 DOMAINS_ENV = os.environ.get("DOMAINS_TO_CHECK", "")
 
 
-# ================= TELEGRAM =================
 def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram env belum di-set", flush=True)
@@ -32,17 +30,13 @@ def send_telegram(text: str):
         print("Gagal kirim Telegram:", e, flush=True)
 
 
-# ================= SELENIUM =================
 def setup_driver():
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1280,720")
-
-    # lebih “normal”
     options.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     )
@@ -51,7 +45,6 @@ def setup_driver():
     return driver
 
 
-# ================= DOMAIN =================
 def load_domains():
     if not DOMAINS_ENV.strip():
         return []
@@ -71,7 +64,7 @@ def chunk(lst, n):
         yield lst[i:i + n]
 
 
-def body_snippet(driver, limit=400):
+def body_snippet(driver, limit=450):
     try:
         t = driver.find_element(By.TAG_NAME, "body").text.strip()
         if not t:
@@ -81,11 +74,7 @@ def body_snippet(driver, limit=400):
         return "(gagal ambil body)"
 
 
-# ================= FIND ELEMENTS (ROBUST) =================
 def find_best_textarea_or_input(driver):
-    """
-    Cari textarea dulu. Jika tidak ada, cari input yang bisa diisi (type=text/search/url).
-    """
     textareas = driver.find_elements(By.TAG_NAME, "textarea")
     for ta in textareas:
         try:
@@ -109,26 +98,8 @@ def find_best_textarea_or_input(driver):
 
 
 def find_action_button(driver):
-    """
-    Cari tombol dengan teks: check/cek/scan/submit.
-    """
-    keywords = ["check", "cek", "scan", "submit", "proses", "process"]
-    # button/a/input
-    candidates = driver.find_elements(
-        By.XPATH,
-        "//*[self::button or self::a or self::input]"
-    )
-
-    def score(el_text: str) -> int:
-        s = (el_text or "").strip().lower()
-        sc = 0
-        for k in keywords:
-            if k in s:
-                sc += 2
-        if sc == 0 and s:
-            # teks ada tapi tidak match keyword
-            sc += 0
-        return sc
+    keywords = ["check", "cek", "scan", "submit", "proses", "process", "search", "cari"]
+    candidates = driver.find_elements(By.XPATH, "//*[self::button or self::a or self::input]")
 
     best = None
     best_score = 0
@@ -140,12 +111,16 @@ def find_action_button(driver):
 
             txt = el.text.strip()
             if not txt:
-                # untuk input button, teks bisa di value
                 txt = (el.get_attribute("value") or "").strip()
+            low = txt.lower()
 
-            sc = score(txt)
-            if sc > best_score:
-                best_score = sc
+            score = 0
+            for k in keywords:
+                if k in low:
+                    score += 2
+
+            if score > best_score:
+                best_score = score
                 best = el
         except Exception:
             pass
@@ -156,108 +131,91 @@ def find_action_button(driver):
     return best
 
 
-# ================= PARSE RESULTS =================
-def parse_table_results(driver):
+def classify_from_line(line: str):
     """
-    Jika ada table, coba parse:
-    - kolom 1 = domain
-    - kolom status ada di kolom lain (cari kata blocked/terblokir/aman/not blocked)
-    Return dict domain_lower -> status_text (raw)
+    Klasifikasi fleksibel dari 1 baris yang mengandung domain.
+    Kita tidak paksa hanya blocked/not blocked, tapi baca kata-kata umum.
     """
-    rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-    if not rows:
-        return {}
+    t = (line or "").lower()
 
-    out = {}
-    for row in rows:
-        tds = row.find_elements(By.TAG_NAME, "td")
-        if len(tds) < 2:
-            continue
-        dom = normalize_domain(tds[0].text).lower()
-        # gabungkan semua kolom selain domain jadi status raw
-        status_raw = " | ".join(td.text.strip() for td in tds[1:] if td.text.strip())
-        if dom:
-            out[dom] = status_raw
-    return out
-
-
-def classify_status(status_raw: str):
-    s = (status_raw or "").lower()
-    # urutan penting: not blocked dulu supaya tidak ketimpa kata blocked
-    if "not blocked" in s or "tidak diblokir" in s or "aman" in s or "allowed" in s or "clean" in s:
+    # aman / tidak diblokir
+    if any(k in t for k in ["not blocked", "tidak diblokir", "aman", "allowed", "clean", "safe", "negatif"]):
         return "🟢", "Not Blocked"
-    if "blocked" in s or "terblokir" in s or "nawala" in s or "ipos" in s:
+
+    # terblokir / nawala / ipos
+    if any(k in t for k in ["blocked", "terblokir", "nawala", "ipos", "positif", "internet positif"]):
         return "🔴", "Blocked"
-    if "error" in s or "gagal" in s:
+
+    if "error" in t or "gagal" in t:
         return "🟠", "Error"
+
+    # fallback: tampilkan ringkasan textnya
     return "⚪", "Unknown"
 
 
-def parse_from_body_text(body_text: str, domains: list[str]):
+def extract_line_for_domain(body_text: str, domain: str) -> str:
     """
-    Fallback: cari per domain di body text.
+    Ambil baris di body_text yang mengandung domain.
+    Kalau tidak ada baris yang jelas, ambil potongan sekitar domain.
     """
+    key = normalize_domain(domain)
+    if not key:
+        return ""
+
+    lines = (body_text or "").splitlines()
+    for ln in lines:
+        if key.lower() in ln.lower():
+            return ln.strip()
+
+    # fallback: ambil potongan sekitar domain (kalau HTML tidak pakai newline)
     lower = (body_text or "").lower()
-    out = {}
-    for d in domains:
-        key = normalize_domain(d).lower()
-        if not key:
-            continue
-        m = re.search(
-            rf"(?<!\w){re.escape(key)}(?!\w).*?\b(not blocked|tidak diblokir|aman|allowed|blocked|terblokir|error)\b",
-            lower,
-            re.IGNORECASE
-        )
-        out[key] = m.group(1) if m else "Unknown"
-    return out
+    idx = lower.find(key.lower())
+    if idx == -1:
+        return ""
+    start = max(0, idx - 80)
+    end = min(len(body_text), idx + len(key) + 120)
+    return body_text[start:end].replace("\n", " ").strip()
 
 
-# ================= CORE CHECK =================
 def check_batch(driver, batch_domains):
     driver.get(TARGET_URL)
     wait = WebDriverWait(driver, 40)
     wait.until(lambda d: d.find_element(By.TAG_NAME, "body"))
 
-    # Deteksi cloudflare "Just a moment..."
-    title = (driver.title or "").lower()
-    body_now = driver.find_element(By.TAG_NAME, "body").text.lower()
-    if "just a moment" in title or "cloudflare" in body_now or "security verification" in body_now:
-        raise RuntimeError("Terkena proteksi Cloudflare/anti-bot (Just a moment / security verification).")
-
     input_el = find_best_textarea_or_input(driver)
     input_el.clear()
-
-    # format satu domain per baris
     input_el.send_keys("\n".join(normalize_domain(x) for x in batch_domains))
 
     btn = find_action_button(driver)
     driver.execute_script("arguments[0].click();", btn)
 
-    # tunggu: table row muncul ATAU kata kunci status muncul
+    # tunggu minimal ada perubahan teks atau muncul domain di body
     def done(d):
-        t = d.find_element(By.TAG_NAME, "body").text.lower()
-        if len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0:
-            return True
-        if any(k in t for k in ["blocked", "terblokir", "not blocked", "tidak diblokir", "aman", "allowed", "error"]):
+        txt = d.find_element(By.TAG_NAME, "body").text
+        # selesai kalau minimal ada salah satu domain muncul di body
+        for dom in batch_domains[: min(5, len(batch_domains))]:
+            if normalize_domain(dom).lower() in txt.lower():
+                return True
+        # atau ada kata-kata status umum
+        low = txt.lower()
+        if any(k in low for k in ["blocked", "terblokir", "nawala", "ipos", "aman", "tidak diblokir", "allowed"]):
             return True
         return False
 
-    wait2 = WebDriverWait(driver, 90)
-    wait2.until(done)
+    WebDriverWait(driver, 90).until(done)
 
-    # coba parse table dulu
-    table_results = parse_table_results(driver)
-    if table_results:
-        return table_results
-
-    # fallback parse body
     body_text = driver.find_element(By.TAG_NAME, "body").text
-    return parse_from_body_text(body_text, batch_domains)
+    results = {}
+
+    for d in batch_domains:
+        key = normalize_domain(d).lower()
+        line = extract_line_for_domain(body_text, d)
+        results[key] = line if line else "Unknown"
+
+    return results
 
 
-# ================= MAIN =================
 def main():
-    # signature
     send_telegram(f"✅ RUNNING NAWALA.ASIA VERSION [{VERSION}]")
 
     domains = load_domains()
@@ -265,16 +223,12 @@ def main():
         send_telegram(f"Domain Status Report (nawala.asia) [{VERSION}]\nTidak ada domain.")
         return
 
-    # kalau situs punya limit, kamu bisa ubah batch size di sini
-    BATCH_SIZE = 50
-
     driver = setup_driver()
     merged = {}
 
     try:
-        for batch in chunk(domains, BATCH_SIZE):
-            res = check_batch(driver, batch)
-            merged.update(res)
+        for batch in chunk(domains, 50):
+            merged.update(check_batch(driver, batch))
 
     except TimeoutException:
         msg = (
@@ -307,13 +261,15 @@ def main():
         except Exception:
             pass
 
-    # build report
     lines = [f"Domain Status Report (nawala.asia) [{VERSION}]"]
     for d in domains:
         key = normalize_domain(d).lower()
-        raw = merged.get(key, "Unknown")
-        emoji, label = classify_status(raw)
-        lines.append(f"{key}: {emoji} {label}")
+        raw_line = merged.get(key, "Unknown")
+        emoji, label = classify_from_line(raw_line)
+
+        # tampilkan status ringkas + (opsional) potongan line biar kamu bisa lihat kata apa yang dipakai situs
+        # Kalau kamu mau super bersih, hapus " — {raw_line}" di bawah.
+        lines.append(f"{key}: {emoji} {label} — {raw_line}")
 
     send_telegram("\n".join(lines))
 
