@@ -9,7 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-VERSION = "trustpositif-app-v1"
+VERSION = "trustpositif-app-final-v1"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -44,9 +44,10 @@ def setup_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1280,720")
 
-    # sedikit lebih “normal” agar tidak mudah ditolak
+    # biar lebih "normal"
     options.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     )
@@ -75,8 +76,8 @@ def chunk(lst, n):
 
 
 def normalize_domain(d: str) -> str:
-    # trustpositif.app minta domain/IP per line, tanpa perlu http(s)
-    x = d.strip()
+    """trustpositif.app minta domain/IP per line (tanpa http/https)."""
+    x = (d or "").strip()
     x = x.replace("https://", "").replace("http://", "")
     x = x.strip().strip("/")
     return x
@@ -86,7 +87,7 @@ def normalize_domain(d: str) -> str:
 def click_scan_button(driver):
     """
     Cari tombol yang mengandung teks 'SCAN' (case-insensitive).
-    Karena UI bisa pakai button/div role=button, kita buat fleksibel.
+    UI bisa pakai button/a/div/span, jadi dibuat fleksibel.
     """
     candidates = driver.find_elements(
         By.XPATH,
@@ -106,31 +107,40 @@ def click_scan_button(driver):
 
 def parse_results_from_text(page_text: str, domains: list[str]) -> dict:
     """
-    Parse hasil dari text halaman.
-    Kita cari pola:
-      domain ... Allowed/Blocked/Error
+    Parse hasil dari teks halaman: cari pola domain + Allowed/Blocked/Error.
     Output: dict domain_lower -> status ('Allowed'/'Blocked'/'Error'/'Unknown')
     """
     text = (page_text or "")
-    results = {}
-
-    # normalisasi agar pencarian stabil
     lower_text = text.lower()
+    results = {}
 
     for d in domains:
         key = normalize_domain(d).lower()
+        if not key:
+            continue
 
-        # regex yang toleran spasi/kolom
-        # contoh: "alien55.com  Allowed"
-        # contoh: "alien55.com   Blocked"
-        m = re.search(rf"(?<!\w){re.escape(key)}(?!\w).*?\b(allowed|blocked|error)\b", lower_text, re.IGNORECASE)
+        # toleran spasi/kolom
+        m = re.search(
+            rf"(?<!\w){re.escape(key)}(?!\w).*?\b(allowed|blocked|error)\b",
+            lower_text,
+            re.IGNORECASE
+        )
         if m:
-            status = m.group(1).capitalize()
-            results[key] = status
+            results[key] = m.group(1).capitalize()
         else:
             results[key] = "Unknown"
 
     return results
+
+
+def body_snippet(driver, limit=350) -> str:
+    try:
+        t = driver.find_element(By.TAG_NAME, "body").text.strip()
+        if not t:
+            return "(body kosong)"
+        return t[:limit] + ("..." if len(t) > limit else "")
+    except Exception:
+        return "(gagal ambil body)"
 
 
 def check_batch_trustpositif(driver, domains_batch: list[str]) -> dict:
@@ -145,14 +155,15 @@ def check_batch_trustpositif(driver, domains_batch: list[str]) -> dict:
 
     click_scan_button(driver)
 
-    # tunggu hasil: minimal ada kata Allowed/Blocked/Error atau total berubah
+    # tunggu hasil muncul: tidak hanya allowed/blocked/error,
+    # tapi juga kata umum (result/hasil/status) agar tidak false-timeout
     def done(d):
-        body_text = d.find_element(By.TAG_NAME, "body").text.lower()
-        if "allowed" in body_text or "blocked" in body_text or "error" in body_text:
+        txt = d.find_element(By.TAG_NAME, "body").text.lower()
+        if any(k in txt for k in ["allowed", "blocked", "error", "hasil", "result", "status"]):
             return True
         return False
 
-    wait2 = WebDriverWait(driver, 80)
+    wait2 = WebDriverWait(driver, 90)
     wait2.until(done)
 
     body_text = driver.find_element(By.TAG_NAME, "body").text
@@ -172,6 +183,9 @@ def to_emoji_label(status: str):
 
 # ================= MAIN =================
 def main():
+    # ✅ signature: pastikan Railway benar-benar menjalankan versi ini
+    send_telegram(f"✅ RUNNING TRUSTPOSITIF VERSION [{VERSION}]")
+
     print(f"=== DOMAIN CHECKER (trustpositif.app) | {VERSION} ===", flush=True)
 
     domains = load_domains()
@@ -179,12 +193,11 @@ def main():
         send_telegram(f"Domain Status Report (trustpositif.app) [{VERSION}]\nTidak ada domain untuk dicek.")
         return
 
-    # trustpositif.app max 100 / scan (dari UI)
-    # jadi kita batch 100 agar aman
     driver = setup_driver()
     final = {}
 
     try:
+        # trustpositif.app max 100 / scan → batch 100
         for batch in chunk(domains, 100):
             res = check_batch_trustpositif(driver, batch)
             final.update(res)
@@ -193,31 +206,32 @@ def main():
         msg = (
             f"❌ Timeout (trustpositif.app) [{VERSION}]\n"
             f"URL: {driver.current_url}\n"
-            f"Title: {driver.title}"
+            f"Title: {driver.title}\n"
+            f"Body: {body_snippet(driver)}"
         )
         print(msg, flush=True)
         traceback.print_exc()
         send_telegram(msg)
+        return
 
     except Exception as e:
         msg = (
             f"❌ Error (trustpositif.app) [{VERSION}]\n"
             f"{type(e).__name__}: {e}\n"
             f"URL: {driver.current_url}\n"
-            f"Title: {driver.title}"
+            f"Title: {driver.title}\n"
+            f"Body: {body_snippet(driver)}"
         )
         print(msg, flush=True)
         traceback.print_exc()
         send_telegram(msg)
+        return
 
     finally:
         try:
             driver.quit()
         except Exception:
             pass
-
-    if not final:
-        return
 
     lines = [f"Domain Status Report (trustpositif.app) [{VERSION}]"]
     for d in domains:
