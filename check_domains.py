@@ -1,208 +1,253 @@
+# check_domains.py
+# FINAL — trustpositif.cc (Selenium)
+# Env:
+#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DOMAINS_TO_CHECK
+# Optional:
+#   TARGET_URL (default https://trustpositif.cc/)
+#
+# DOMAINS_TO_CHECK format: dipisah koma atau enter
+# contoh: pk95anomali.space, rtpbetx400.store, boxing55d.pro
+
 import os
-import json
+import re
 import requests
-from typing import Any, Dict, List, Optional, Tuple
+from time import sleep
+from typing import Dict, List, Tuple
 
-VERSION = "nawala-asia-api-final-v3"
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
-API_URL = "https://ukvsutaqqtjsebnkdmmt.supabase.co/functions/v1/check-domains"
+VERSION = "trustpositif-cc-final-v1"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DOMAINS_ENV = os.environ.get("DOMAINS_TO_CHECK", "")
 
-# WAJIB: isi dengan key dari header apikey/authorization (sama persis)
-NAWALA_API_KEY = os.environ.get("NAWALA_API_KEY", "").strip()
+TARGET_URL = os.environ.get("TARGET_URL", "https://trustpositif.cc/").strip() or "https://trustpositif.cc/"
 
 
-# ----------------- TELEGRAM -----------------
+# ================= TELEGRAM =================
 def send_telegram(text: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram env belum di-set", flush=True)
         return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
     try:
-        r = requests.post(url, json=payload, timeout=20)
+        r = requests.post(url, json=payload, timeout=25)
         print("Telegram resp:", r.status_code, r.text[:200], flush=True)
     except Exception as e:
         print("Gagal kirim Telegram:", e, flush=True)
 
 
-# ----------------- DOMAINS -----------------
+# ================= DOMAIN HELPERS =================
 def load_domains() -> List[str]:
     raw = (DOMAINS_ENV or "").strip()
     if not raw:
         return []
-
     raw = raw.replace("\n", ",")
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
     out: List[str] = []
     for d in parts:
-        x = d.replace("https://", "").replace("http://", "").strip().strip("/")
+        x = d.strip()
+        x = x.replace("https://", "").replace("http://", "")
+        x = x.strip().strip("/")
         if x:
             out.append(x)
     return out
 
 
-# ----------------- API CALL -----------------
-def build_headers() -> Dict[str, str]:
-    # Header minimal yang penting + key supabase
-    return {
-        "accept": "*/*",
-        "content-type": "application/json",
-        "origin": "https://www.nawala.asia",
-        "referer": "https://www.nawala.asia/",
-        "user-agent": "Mozilla/5.0",
-        "apikey": NAWALA_API_KEY,
-        "authorization": f"Bearer {NAWALA_API_KEY}",
-    }
+def chunk(lst: List[str], n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i : i + n]
 
 
-def post_json(payload: Dict[str, Any]) -> Tuple[int, str, Optional[Any]]:
-    headers = build_headers()
-    try:
-        r = requests.post(API_URL, headers=headers, json=payload, timeout=45)
-    except Exception as e:
-        return 0, f"Request error: {type(e).__name__}: {e}", None
-
-    txt = r.text or ""
-    if r.status_code != 200:
-        return r.status_code, txt[:600], None
-
-    # try json
-    try:
-        return r.status_code, txt[:600], r.json()
-    except Exception:
-        return r.status_code, txt[:600], None
-
-
-def call_api(domains: List[str]) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def normalize_status(raw_status: str) -> Tuple[str, str]:
     """
-    Karena payload request asli belum kelihatan (yang kamu kirim body-nya seperti response),
-    kita coba beberapa format input yang umum untuk edge function ini.
-
-    API harus balas JSON dengan {"success": true, "data": [...]}
+    trustpositif.cc status di tabel: "Aman", "Terblokir", bisa juga "Error"
     """
-    candidates = [
-        {"domains": domains},
-        {"data": domains},
-        {"domains": "\n".join(domains)},
-        {"data": "\n".join(domains)},
-        {"items": domains},
-        {"list": domains},
-    ]
+    t = (raw_status or "").strip().lower()
 
-    last_info = ""
-    for i, payload in enumerate(candidates, start=1):
-        code, preview, data = post_json(payload)
-        last_info = f"try#{i} HTTP {code} preview={preview}"
+    if not t:
+        return "⚪", "Unknown"
 
-        if isinstance(data, dict) and data.get("success") is True and isinstance(data.get("data"), list):
-            return True, f"OK (payload try#{i})", data
-
-        # beberapa server tidak pakai "success", tapi langsung "data"
-        if isinstance(data, dict) and isinstance(data.get("data"), list):
-            return True, f"OK (payload try#{i}, no success flag)", data
-
-    return False, last_info, None
-
-
-# ----------------- PARSE RESULT -----------------
-def status_to_emoji_label(blocked: Optional[bool]) -> Tuple[str, str]:
-    if blocked is True:
-        return "🔴", "Blocked"
-    if blocked is False:
+    if "aman" in t or "not blocked" in t:
         return "🟢", "Not Blocked"
-    return "⚪", "Unknown"
+
+    if "terblokir" in t or "blocked" in t or "nawala" in t:
+        return "🔴", "Blocked"
+
+    if "error" in t or "gagal" in t:
+        return "🟠", "Error"
+
+    return "⚪", raw_status.strip()
 
 
-def parse_results(api_json: Dict[str, Any]) -> Dict[str, Dict[str, Optional[bool]]]:
+# ================= SELENIUM =================
+def setup_driver() -> webdriver.Chrome:
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1400,900")
+    opts.add_argument("--lang=id-ID")
+
+    # UA "normal" biar lebih aman
+    opts.add_argument(
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+    )
+
+    driver = webdriver.Chrome(options=opts)
+    driver.set_page_load_timeout(60)
+    return driver
+
+
+def find_textarea(wait: WebDriverWait):
+    # Dari screenshot: textarea besar di tengah (biasanya cuma satu).
+    # Kita cari yang paling besar/utama.
+    tas = wait.until(lambda d: d.find_elements(By.TAG_NAME, "textarea"))
+    if not tas:
+        raise RuntimeError("Textarea input domain tidak ditemukan")
+    # pilih textarea pertama (umumnya benar)
+    return tas[0]
+
+
+def click_submit(wait: WebDriverWait, driver: webdriver.Chrome):
+    # Tombol di UI: "Cek Sekarang - Gratis!" atau sejenis.
+    # Kita cari button yang mengandung kata "Cek" atau "Gratis" atau "Sekarang".
+    xpaths = [
+        "//button[contains(., 'Cek Sekarang')]",
+        "//button[contains(., 'Cek')]",
+        "//button[contains(., 'Gratis')]",
+    ]
+    for xp in xpaths:
+        try:
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
+            driver.execute_script("arguments[0].click();", btn)
+            return
+        except Exception:
+            pass
+    raise RuntimeError("Tombol submit (Cek Sekarang) tidak ditemukan")
+
+
+def wait_results_table(wait: WebDriverWait):
+    # Setelah submit, akan muncul tabel hasil (kolom: No, Domain, Status, dst)
+    # Cari tbody tr minimal 1 row
+    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0)
+
+
+def parse_table(driver: webdriver.Chrome) -> Dict[str, str]:
     """
-    Expected response (dari cURL kamu):
-      {"success":true,"data":[{"domain":"x","nawala":{"blocked":false},"network":{"blocked":false}}]}
-    Return:
-      { "x": {"nawala": False, "network": False}, ... }
+    Return: dict domain_lower -> status_raw_text
     """
-    out: Dict[str, Dict[str, Optional[bool]]] = {}
-    items = api_json.get("data", [])
-    if not isinstance(items, list):
-        return out
+    rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+    out: Dict[str, str] = {}
 
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        dom = (it.get("domain") or "").strip().lower()
-        if not dom:
+    for row in rows:
+        tds = row.find_elements(By.TAG_NAME, "td")
+        # biasanya: [No, Domain, Status, Waktu Cek, Kecepatan]
+        if len(tds) < 3:
             continue
 
-        nawala_blocked = None
-        network_blocked = None
+        domain = tds[1].text.strip().lower()
+        status = tds[2].text.strip()
 
-        n = it.get("nawala")
-        if isinstance(n, dict):
-            if "blocked" in n:
-                nawala_blocked = bool(n["blocked"])
-
-        nw = it.get("network")
-        if isinstance(nw, dict):
-            if "blocked" in nw:
-                network_blocked = bool(nw["blocked"])
-
-        out[dom] = {"nawala": nawala_blocked, "network": network_blocked}
+        if domain:
+            out[domain] = status
 
     return out
 
 
-# ----------------- MAIN -----------------
-def main() -> None:
-    send_telegram(f"✅ RUNNING NAWALA.ASIA API VERSION [{VERSION}]")
+def check_batch(driver: webdriver.Chrome, domains: List[str]) -> Dict[str, str]:
+    wait = WebDriverWait(driver, 45)
+    driver.get(TARGET_URL)
 
-    if not NAWALA_API_KEY:
-        send_telegram(
-            f"❌ NAWALA_API_KEY belum di-set [{VERSION}]\n"
-            f"Set env NAWALA_API_KEY = apikey/authorization dari Network."
-        )
-        return
+    # pastikan body siap
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+    textarea = find_textarea(wait)
+    textarea.clear()
+    textarea.send_keys("\n".join(domains))
+
+    click_submit(wait, driver)
+
+    # tunggu hasil
+    wait_results_table(WebDriverWait(driver, 80))
+
+    # parse tabel
+    return parse_table(driver)
+
+
+# ================= MAIN =================
+def main():
+    send_telegram(f"✅ RUNNING TRUSTPOSITIF.CC VERSION [{VERSION}]")
 
     domains = load_domains()
     if not domains:
-        send_telegram(f"Domain Status Report (nawala.asia API) [{VERSION}]\nTidak ada domain untuk dicek.")
+        send_telegram(f"Domain Status Report (trustpositif.cc) [{VERSION}]\nTidak ada domain untuk dicek.")
         return
 
-    ok, info, data = call_api(domains)
-    if not ok or not data:
-        send_telegram(
-            f"❌ Gagal call API [{VERSION}]\n"
-            f"Endpoint: {API_URL}\n"
-            f"Info: {info}\n"
-            f"Catatan: Pastikan NAWALA_API_KEY benar, dan payload cocok."
+    # UI menunjukkan max 100 domain
+    batches = list(chunk(domains, 100))
+
+    driver = setup_driver()
+    all_results: Dict[str, str] = {}
+
+    try:
+        for i, batch in enumerate(batches, start=1):
+            print(f"Checking batch {i}/{len(batches)}: {len(batch)} domains", flush=True)
+            res = check_batch(driver, batch)
+            all_results.update(res)
+
+            # jeda kecil biar stabil
+            sleep(1.5)
+
+    except TimeoutException:
+        msg = (
+            f"❌ Timeout (trustpositif.cc) [{VERSION}]\n"
+            f"URL: {driver.current_url}\n"
+            f"Title: {driver.title}"
         )
+        print(msg, flush=True)
+        send_telegram(msg)
         return
 
-    results = parse_results(data)
-    if not results:
-        preview = json.dumps(data, ensure_ascii=False)[:900]
-        send_telegram(
-            f"⚠️ API OK tapi hasil kosong/tidak ter-parse [{VERSION}]\n"
-            f"{info}\n"
-            f"Response preview:\n{preview}"
+    except Exception as e:
+        msg = (
+            f"❌ Error (trustpositif.cc) [{VERSION}]\n"
+            f"{type(e).__name__}: {e}\n"
+            f"URL: {driver.current_url}\n"
+            f"Title: {driver.title}"
         )
+        print(msg, flush=True)
+        send_telegram(msg)
         return
 
-    lines = [f"Domain Status Report (nawala.asia API) [{VERSION}]"]
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+    # Susun laporan (tanpa “keterangan” tambahan)
+    lines = [f"Domain Status Report (trustpositif.cc) [{VERSION}]"]
 
     for d in domains:
         key = d.lower()
-        item = results.get(key, {"nawala": None, "network": None})
-
-        e1, l1 = status_to_emoji_label(item.get("nawala"))
-        e2, l2 = status_to_emoji_label(item.get("network"))
-
-        # kamu bisa pilih tampilkan hanya Nawala atau dua-duanya.
-        # Di sini saya tampilkan dua status biar jelas:
-        lines.append(f"{key}: Nawala {e1} {l1} | Network {e2} {l2}")
+        raw_status = all_results.get(key, "")
+        emoji, label = normalize_status(raw_status)
+        lines.append(f"{key}: {emoji} {label}")
 
     send_telegram("\n".join(lines))
 
