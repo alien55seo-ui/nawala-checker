@@ -1,11 +1,11 @@
 # check_domains.py
-# FINAL CLEAN VERSION — trustpositif.cc
+# UPDATED VERSION — trustpositif.infonawala.com
 # Env:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
 #   DOMAINS_TO_CHECK   (pisah koma atau enter)
 # Optional:
-#   TARGET_URL (default https://trustpositif.cc/)
+#   TARGET_URL (default https://trustpositif.infonawala.com/)
 
 import os
 import requests
@@ -23,7 +23,7 @@ from selenium.common.exceptions import TimeoutException
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DOMAINS_ENV = os.environ.get("DOMAINS_TO_CHECK", "")
-TARGET_URL = os.environ.get("TARGET_URL", "https://trustpositif.cc/")
+TARGET_URL = os.environ.get("TARGET_URL", "https://trustpositif.infonawala.com/")  # <-- UPDATED
 
 
 # ================= TELEGRAM =================
@@ -70,9 +70,10 @@ def chunk(lst: List[str], n: int):
 def normalize_status(raw: str) -> Tuple[str, str]:
     t = (raw or "").lower()
 
-    if "aman" in t:
+    # Website baru pakai kata "aman" / "terblokir" / "blokir"
+    if "aman" in t or "not blocked" in t or "clean" in t:
         return "🟢", "Not Blocked"
-    if "terblokir" in t:
+    if "terblokir" in t or "blocked" in t or "blokir" in t:
         return "🔴", "Blocked"
     if "error" in t:
         return "🟠", "Error"
@@ -106,13 +107,17 @@ def find_textarea(wait):
 
 
 def click_submit(wait, driver):
+    # Website baru tombolnya "Check Domains" (bukan "Cek")
     btn = wait.until(
-        EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Cek')]"))
+        EC.element_to_be_clickable(
+            (By.XPATH, "//button[contains(., 'Check') or contains(., 'Cek')]")
+        )
     )
     driver.execute_script("arguments[0].click();", btn)
 
 
 def wait_results(wait):
+    # Tunggu tabel hasil muncul
     wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0)
 
 
@@ -136,6 +141,17 @@ def check_batch(driver, domains: List[str]) -> Dict[str, str]:
 
     driver.get(TARGET_URL)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+    # Website baru: pastikan checkbox "Kominfo / Status Nawala" aktif dulu
+    try:
+        kominfo_checkbox = driver.find_elements(
+            By.XPATH, "//input[@type='checkbox']"
+        )
+        if kominfo_checkbox and not kominfo_checkbox[0].is_selected():
+            driver.execute_script("arguments[0].click();", kominfo_checkbox[0])
+            sleep(0.5)
+    except Exception:
+        pass  # Lanjut saja kalau checkbox tidak ditemukan
 
     textarea = find_textarea(wait)
     textarea.clear()
@@ -164,7 +180,7 @@ def main():
             sleep(1.2)
 
     except TimeoutException:
-        send_telegram("❌ Timeout saat cek trustpositif.cc")
+        send_telegram("❌ Timeout saat cek trustpositif.infonawala.com")  # <-- UPDATED
         return
     except Exception as e:
         send_telegram(f"❌ Error: {type(e).__name__} - {e}")
@@ -176,7 +192,7 @@ def main():
             pass
 
     # Susun laporan final
-    lines = ["Domain Status Report (trustpositif.cc)"]
+    lines = ["Domain Status Report (trustpositif.infonawala.com)"]  # <-- UPDATED
 
     for d in domains:
         raw = results.get(d, "")
