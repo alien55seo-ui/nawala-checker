@@ -1,5 +1,5 @@
 # check_domains.py
-# UPDATED VERSION — trustpositif.infonawala.com
+# UPDATED VERSION — trustpositif.infonawala.com (DEBUG MODE)
 # Env:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
@@ -94,35 +94,76 @@ def setup_driver():
     )
 
     driver = webdriver.Chrome(options=opts)
-    driver.set_page_load_timeout(90)  # naik dari 60
+    driver.set_page_load_timeout(90)
     return driver
 
 
-def find_textarea(wait):
-    tas = wait.until(lambda d: d.find_elements(By.TAG_NAME, "textarea"))
-    if not tas:
-        raise RuntimeError("Textarea tidak ditemukan")
-    return tas[0]
+def check_batch(driver, domains: List[str]) -> Dict[str, str]:
+    wait = WebDriverWait(driver, 60)
 
+    print(f"[1] Membuka URL: {TARGET_URL}", flush=True)
+    driver.get(TARGET_URL)
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    print(f"[2] Halaman berhasil dimuat. Title: {driver.title}", flush=True)
 
-def click_submit(wait, driver):
-    # website baru tombolnya "Check Domains"
+    # Debug: cetak semua tombol yang ada
+    buttons = driver.find_elements(By.TAG_NAME, "button")
+    print(f"[3] Jumlah tombol ditemukan: {len(buttons)}", flush=True)
+    for i, b in enumerate(buttons):
+        print(f"    Tombol[{i}]: '{b.text.strip()}' | class='{b.get_attribute('class')}'", flush=True)
+
+    # Debug: cetak semua textarea
+    textareas = driver.find_elements(By.TAG_NAME, "textarea")
+    print(f"[4] Jumlah textarea ditemukan: {len(textareas)}", flush=True)
+    for i, t in enumerate(textareas):
+        print(f"    Textarea[{i}]: placeholder='{t.get_attribute('placeholder')}'", flush=True)
+
+    # Debug: cetak semua checkbox
+    checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox']")
+    print(f"[5] Jumlah checkbox ditemukan: {len(checkboxes)}", flush=True)
+
+    if not textareas:
+        raise RuntimeError("Textarea tidak ditemukan di halaman")
+
+    # Aktifkan checkbox pertama (Kominfo) jika belum aktif
+    if checkboxes and not checkboxes[0].is_selected():
+        print("[6] Klik checkbox Kominfo...", flush=True)
+        driver.execute_script("arguments[0].click();", checkboxes[0])
+        sleep(0.5)
+
+    # Isi textarea
+    print(f"[7] Mengisi {len(domains)} domain ke textarea...", flush=True)
+    textareas[0].clear()
+    textareas[0].send_keys("\n".join(domains))
+
+    # Klik tombol submit
+    print("[8] Mencari tombol submit...", flush=True)
     btn = wait.until(
         EC.element_to_be_clickable(
             (By.XPATH, "//button[contains(., 'Check') or contains(., 'Cek')]")
         )
     )
+    print(f"[9] Klik tombol: '{btn.text.strip()}'", flush=True)
     driver.execute_script("arguments[0].click();", btn)
 
+    # Tunggu hasil tabel
+    print("[10] Menunggu tabel hasil...", flush=True)
+    WebDriverWait(driver, 120).until(
+        lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0
+    )
 
-def wait_results(wait):
-    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table tbody tr")) > 0)
-
-
-def parse_table(driver) -> Dict[str, str]:
+    # Parse tabel
     rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-    out = {}
+    print(f"[11] Tabel ditemukan: {len(rows)} baris", flush=True)
 
+    # Debug: cetak isi baris pertama
+    if rows:
+        tds = rows[0].find_elements(By.TAG_NAME, "td")
+        print(f"[12] Kolom di baris pertama: {len(tds)}", flush=True)
+        for i, td in enumerate(tds):
+            print(f"     td[{i}]: '{td.text.strip()}'", flush=True)
+
+    out = {}
     for row in rows:
         tds = row.find_elements(By.TAG_NAME, "td")
         if len(tds) >= 3:
@@ -134,39 +175,19 @@ def parse_table(driver) -> Dict[str, str]:
     return out
 
 
-def check_batch(driver, domains: List[str]) -> Dict[str, str]:
-    wait = WebDriverWait(driver, 60)  # naik dari 45
-
-    driver.get(TARGET_URL)
-    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-
-    # pastikan checkbox Kominfo/Status Nawala aktif
-    try:
-        checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox']")
-        if checkboxes and not checkboxes[0].is_selected():
-            driver.execute_script("arguments[0].click();", checkboxes[0])
-            sleep(0.5)
-    except Exception:
-        pass
-
-    textarea = find_textarea(wait)
-    textarea.clear()
-    textarea.send_keys("\n".join(domains))
-
-    click_submit(wait, driver)
-    wait_results(WebDriverWait(driver, 120))  # naik dari 80
-
-    return parse_table(driver)
-
-
 # ================= MAIN =================
 def main():
+    print("=== Nawala Checker START ===", flush=True)
+
     domains = load_domains()
+    print(f"Domain dimuat: {len(domains)}", flush=True)
+
     if not domains:
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
     driver = setup_driver()
+    print("Driver Selenium siap.", flush=True)
     results = {}
 
     try:
@@ -175,11 +196,15 @@ def main():
             results.update(res)
             sleep(1.2)
 
-    except TimeoutException:
-        send_telegram("❌ Timeout saat cek trustpositif.infonawala.com")
+    except TimeoutException as e:
+        msg = f"❌ Timeout saat cek trustpositif.infonawala.com\n{e}"
+        print(msg, flush=True)
+        send_telegram(msg)
         return
     except Exception as e:
-        send_telegram(f"❌ Error: {type(e).__name__} - {e}")
+        msg = f"❌ Error: {type(e).__name__} - {e}"
+        print(msg, flush=True)
+        send_telegram(msg)
         return
     finally:
         try:
@@ -187,15 +212,14 @@ def main():
         except Exception:
             pass
 
-    # Susun laporan final
     lines = ["Domain Status Report (trustpositif.infonawala.com)"]
-
     for d in domains:
         raw = results.get(d, "")
         emoji, label = normalize_status(raw)
         lines.append(f"{d}: {emoji} {label}")
 
     send_telegram("\n".join(lines))
+    print("=== Nawala Checker DONE ===", flush=True)
 
 
 if __name__ == "__main__":
