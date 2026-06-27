@@ -1,29 +1,29 @@
 # check_domains.py
-# FINAL VERSION — API Check + Bitly Auto-Update (3 links)
+# FINAL VERSION — API Check + Cloudflare KV Auto-Update
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
 #   DOMAINS_TO_CHECK   (pisah koma) — daftar domain cadangan
-#   BITLY_TOKEN        (API token Bitly)
-#   BITLY_LINK_ID_1    (contoh: boxing-55)
-#   BITLY_LINK_ID_2    (contoh: boxing55amp)
-#   BITLY_LINK_ID_3    (contoh: box55amp)
-#   API_KEY            (optional)
+#   CF_API_TOKEN       (Cloudflare API Token)
+#   CF_ACCOUNT_ID      (Cloudflare Account ID)
+#   CF_KV_NAMESPACE_ID (Cloudflare KV Namespace ID)
+#   CF_KV_KEY          (key di KV, contoh: boxing55) — isi sesuai group
+#   API_KEY            (optional, API key trustpositif.id)
 
 import os
 import requests
 from time import sleep
 from typing import Dict, List, Tuple
 
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-DOMAINS_ENV      = os.environ.get("DOMAINS_TO_CHECK", "")
-BITLY_TOKEN      = os.environ.get("BITLY_TOKEN", "")
-BITLY_LINK_ID_1  = os.environ.get("BITLY_LINK_ID_1", "")
-BITLY_LINK_ID_2  = os.environ.get("BITLY_LINK_ID_2", "")
-BITLY_LINK_ID_3  = os.environ.get("BITLY_LINK_ID_3", "")
-API_KEY          = os.environ.get("API_KEY", "")
+TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+DOMAINS_ENV        = os.environ.get("DOMAINS_TO_CHECK", "")
+CF_API_TOKEN       = os.environ.get("CF_API_TOKEN", "")
+CF_ACCOUNT_ID      = os.environ.get("CF_ACCOUNT_ID", "")
+CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID", "")
+CF_KV_KEY          = os.environ.get("CF_KV_KEY", "")
+API_KEY            = os.environ.get("API_KEY", "")
 
 API_URL = "https://trustpositif.id/api/v1/check"
 
@@ -85,40 +85,36 @@ def check_batch_api(domains: List[str]) -> Dict[str, bool]:
     return results
 
 
-# ================= BITLY =================
-def update_bitly(link_id: str, new_url: str) -> bool:
-    if not link_id:
+# ================= CLOUDFLARE KV =================
+def update_cloudflare_kv(key: str, value: str) -> bool:
+    """Update KV Cloudflare dengan domain aktif."""
+    if not CF_API_TOKEN or not CF_ACCOUNT_ID or not CF_KV_NAMESPACE_ID:
+        print("[CF] Cloudflare env belum lengkap!", flush=True)
         return False
-    url = f"https://api-ssl.bitly.com/v4/bitlinks/bit.ly/{link_id}"
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/{key}"
     headers = {
-        "Authorization": f"Bearer {BITLY_TOKEN}",
-        "Content-Type": "application/json",
+        "Authorization": f"Bearer {CF_API_TOKEN}",
+        "Content-Type": "text/plain",
     }
-    payload = {"long_url": f"https://{new_url}"}
     try:
-        resp = requests.patch(url, json=payload, headers=headers, timeout=15)
+        resp = requests.put(url, headers=headers, data=value, timeout=15)
         resp.raise_for_status()
-        print(f"[Bitly] bit.ly/{link_id} -> https://{new_url}", flush=True)
-        return True
+        data = resp.json()
+        if data.get("success"):
+            print(f"[CF] KV updated: {key} = {value}", flush=True)
+            return True
+        else:
+            print(f"[CF] KV update gagal: {data}", flush=True)
+            return False
     except Exception as e:
-        print(f"[Bitly] Gagal update bit.ly/{link_id}: {e}", flush=True)
+        print(f"[CF] Error: {type(e).__name__} - {e}", flush=True)
         return False
-
-
-def update_all_bitly_links(active_domain: str) -> List[str]:
-    updated = []
-    for link_id in [BITLY_LINK_ID_1, BITLY_LINK_ID_2, BITLY_LINK_ID_3]:
-        if link_id:
-            ok = update_bitly(link_id, active_domain)
-            if ok:
-                updated.append(f"bit.ly/{link_id}")
-            sleep(1)
-    return updated
 
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker + Bitly Auto-Update START ===", flush=True)
+    print("=== Nawala Checker + Cloudflare KV START ===", flush=True)
     domains = load_domains()
     print(f"Total domain: {len(domains)}", flush=True)
 
@@ -126,6 +122,7 @@ def main():
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
+    # Cek semua domain
     all_results: Dict[str, bool] = {}
     for i, batch in enumerate(chunk(domains, 10)):
         try:
@@ -144,13 +141,17 @@ def main():
 
     print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
 
-    updated_links = []
+    # Update Cloudflare KV
+    kv_updated = False
     new_active_domain = ""
 
-    if BITLY_TOKEN and safe_domains:
+    if safe_domains and CF_KV_KEY:
         new_active_domain = safe_domains[0]
-        updated_links = update_all_bitly_links(new_active_domain)
+        kv_updated = update_cloudflare_kv(CF_KV_KEY, new_active_domain)
+    elif not CF_KV_KEY:
+        print("[CF] CF_KV_KEY belum diset!", flush=True)
 
+    # Susun laporan
     lines = ["📊 Domain Status Report"]
     for d in domains:
         blocked = all_results.get(d, None)
@@ -164,14 +165,12 @@ def main():
     lines.append("")
     lines.append(f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}")
 
-    if updated_links:
-        lines.append(f"\n🔗 Bitly diupdate ke: {new_active_domain}")
-        for link in updated_links:
-            lines.append(f"   • {link}")
+    if kv_updated:
+        lines.append(f"\n🔗 Redirect aktif: {new_active_domain}")
     elif blocked_domains and not safe_domains:
         lines.append("\n🚨 SEMUA DOMAIN DIBLOKIR! Tambah domain cadangan baru.")
-    elif not BITLY_TOKEN:
-        lines.append("\n⚠️ BITLY_TOKEN belum diset di Railway Variables.")
+    elif not CF_KV_KEY:
+        lines.append("\n⚠️ CF_KV_KEY belum diset di Railway Variables.")
 
     report = "\n".join(lines)
     print(report, flush=True)
