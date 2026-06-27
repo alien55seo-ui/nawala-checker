@@ -1,14 +1,14 @@
 # check_domains.py
-# FINAL VERSION — API Check + Bitly Auto-Update (2 links)
+# FINAL VERSION — API Check + Bitly Auto-Update (3 links)
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
 #   DOMAINS_TO_CHECK   (pisah koma) — daftar domain cadangan
 #   BITLY_TOKEN        (API token Bitly)
-#   BITLY_LINK_ID_1    (ID link bitly pertama,  contoh: boxing-55)
-#   BITLY_LINK_ID_2    (ID link bitly kedua,    contoh: boxing55amp)
-#   BITLY_LINK_ID_3    (ID link bitly ketiga,   contoh: box55amp)
+#   BITLY_LINK_ID_1    (contoh: boxing-55)
+#   BITLY_LINK_ID_2    (contoh: boxing55amp)
+#   BITLY_LINK_ID_3    (contoh: box55amp)
 #   API_KEY            (optional)
 
 import os
@@ -87,7 +87,6 @@ def check_batch_api(domains: List[str]) -> Dict[str, bool]:
 
 # ================= BITLY =================
 def update_bitly(link_id: str, new_url: str) -> bool:
-    """Update destination URL bitly ke domain baru."""
     if not link_id:
         return False
     url = f"https://api-ssl.bitly.com/v4/bitlinks/bit.ly/{link_id}"
@@ -99,7 +98,7 @@ def update_bitly(link_id: str, new_url: str) -> bool:
     try:
         resp = requests.patch(url, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
-        print(f"[Bitly] bit.ly/{link_id} → https://{new_url}", flush=True)
+        print(f"[Bitly] bit.ly/{link_id} -> https://{new_url}", flush=True)
         return True
     except Exception as e:
         print(f"[Bitly] Gagal update bit.ly/{link_id}: {e}", flush=True)
@@ -107,14 +106,13 @@ def update_bitly(link_id: str, new_url: str) -> bool:
 
 
 def update_all_bitly_links(active_domain: str) -> List[str]:
-    """Update semua bitly links ke domain aktif. Return list link yang berhasil."""
     updated = []
     for link_id in [BITLY_LINK_ID_1, BITLY_LINK_ID_2, BITLY_LINK_ID_3]:
         if link_id:
             ok = update_bitly(link_id, active_domain)
             if ok:
                 updated.append(f"bit.ly/{link_id}")
-            sleep(1)  # jaga rate limit Bitly
+            sleep(1)
     return updated
 
 
@@ -128,7 +126,6 @@ def main():
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
-    # Cek semua domain
     all_results: Dict[str, bool] = {}
     for i, batch in enumerate(chunk(domains, 10)):
         try:
@@ -142,13 +139,11 @@ def main():
         if i > 0:
             sleep(6)
 
-    # Pisahkan domain aman vs diblokir
     safe_domains    = [d for d in domains if not all_results.get(d, False)]
     blocked_domains = [d for d in domains if all_results.get(d, False)]
 
     print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
 
-    # Update semua Bitly ke domain aman pertama
     updated_links = []
     new_active_domain = ""
 
@@ -156,7 +151,6 @@ def main():
         new_active_domain = safe_domains[0]
         updated_links = update_all_bitly_links(new_active_domain)
 
-    # Susun laporan Telegram
     lines = ["📊 Domain Status Report"]
     for d in domains:
         blocked = all_results.get(d, None)
@@ -186,4 +180,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()c
+    main()
