@@ -1,5 +1,5 @@
 # check_domains.py
-# UPDATED VERSION — trustpositif.infonawala.com (DEBUG MODE v2)
+# UPDATED VERSION — trustpositif.infonawala.com (DEBUG MODE v3)
 # Env:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
@@ -95,66 +95,75 @@ def check_batch(driver, domains: List[str]) -> Dict[str, str]:
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
     print(f"[2] Halaman dimuat. Title: {driver.title}", flush=True)
 
+    # Klik SEMUA tombol metrics/checkbox yang ada (Kominfo, SSL, DNS, WHOIS, dll)
+    print("[3] Mengklik semua tombol metrics...", flush=True)
+    metric_buttons = driver.find_elements(
+        By.XPATH, "//div[contains(@class,'grid')]//button"
+    )
+    print(f"    Tombol metrics ditemukan: {len(metric_buttons)}", flush=True)
+    for i, mb in enumerate(metric_buttons):
+        try:
+            label = mb.text.strip()
+            print(f"    Klik metrics[{i}]: '{label}'", flush=True)
+            driver.execute_script("arguments[0].click();", mb)
+            sleep(0.3)
+        except Exception as e:
+            print(f"    Gagal klik metrics[{i}]: {e}", flush=True)
+
+    sleep(1)
+
+    # Isi textarea domain
     textareas = driver.find_elements(By.TAG_NAME, "textarea")
     if not textareas:
         raise RuntimeError("Textarea tidak ditemukan")
-
-    print(f"[3] Mengisi {len(domains)} domain...", flush=True)
+    print(f"[4] Mengisi {len(domains)} domain...", flush=True)
     textareas[0].clear()
     textareas[0].send_keys("\n".join(domains))
+    sleep(0.5)
 
+    # Klik tombol Check Domains
     btn = wait.until(
         EC.element_to_be_clickable(
             (By.XPATH, "//button[contains(., 'Check') or contains(., 'Cek')]")
         )
     )
-    print(f"[4] Klik tombol: '{btn.text.strip()}'", flush=True)
+    print(f"[5] Klik tombol: '{btn.text.strip()}'", flush=True)
     driver.execute_script("arguments[0].click();", btn)
 
-    # Tunggu 15 detik agar hasil render
-    print("[5] Menunggu 15 detik setelah klik...", flush=True)
-    sleep(15)
+    # Tunggu hasil muncul — cari div/element yang mengandung nama domain
+    print("[6] Menunggu hasil muncul (max 60 detik)...", flush=True)
+    first_domain = domains[0].lower()
 
-    # Debug: cari semua elemen yang mungkin jadi container hasil
-    print("[6] Mencari container hasil...", flush=True)
+    def result_appeared(d):
+        body = d.find_element(By.TAG_NAME, "body").get_attribute("innerHTML").lower()
+        # Cari indikator hasil: domain muncul di luar textarea + ada kata status
+        count = body.count(first_domain)
+        return count >= 2  # muncul minimal 2x (textarea + hasil)
 
-    # Cek table
-    tables = driver.find_elements(By.TAG_NAME, "table")
-    print(f"    <table> ditemukan: {len(tables)}", flush=True)
+    try:
+        WebDriverWait(driver, 60).until(result_appeared)
+        print("[7] Hasil terdeteksi!", flush=True)
+    except TimeoutException:
+        print("[7] Timeout menunggu hasil, lanjut dump HTML...", flush=True)
 
-    # Cek div dengan kata kunci hasil
-    for kw in ["result", "hasil", "domain", "status", "check"]:
-        els = driver.find_elements(By.XPATH, f"//*[contains(@class, '{kw}') or contains(@id, '{kw}')]")
-        if els:
-            print(f"    Elemen dengan '{kw}': {len(els)} | contoh tag={els[0].tag_name} class='{els[0].get_attribute('class')}'", flush=True)
-
-    # Cek semua <tr>
-    trs = driver.find_elements(By.TAG_NAME, "tr")
-    print(f"    <tr> ditemukan: {len(trs)}", flush=True)
-
-    # Cek semua <li>
-    lis = driver.find_elements(By.TAG_NAME, "li")
-    print(f"    <li> ditemukan: {len(lis)}", flush=True)
-
-    # Dump sebagian HTML body (500 char pertama setelah klik)
+    # Dump HTML untuk analisis
     body_html = driver.find_element(By.TAG_NAME, "body").get_attribute("innerHTML")
-    # Cari bagian yang relevan — cari domain pertama dalam HTML
-    first_domain = domains[0] if domains else ""
-    idx = body_html.lower().find(first_domain.lower())
-    if idx >= 0:
-        snippet = body_html[max(0, idx-200):idx+500]
-        print(f"[7] HTML di sekitar domain '{first_domain}':\n{snippet}", flush=True)
+    idx = body_html.lower().find(first_domain)
+    # Cari kemunculan ke-2
+    idx2 = body_html.lower().find(first_domain, idx + 1) if idx >= 0 else -1
+
+    if idx2 >= 0:
+        snippet = body_html[max(0, idx2-300):idx2+600]
+        print(f"[8] HTML hasil di sekitar domain '{first_domain}':\n{snippet}", flush=True)
     else:
-        print(f"[7] Domain '{first_domain}' tidak ditemukan dalam HTML!", flush=True)
-        # Dump 1000 char pertama body
-        print(f"    Body HTML (1000 char pertama):\n{body_html[:1000]}", flush=True)
+        print(f"[8] Hasil tidak ditemukan. Body HTML (2000 char terakhir):\n{body_html[-2000:]}", flush=True)
 
     return {}
 
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker DEBUG v2 START ===", flush=True)
+    print("=== Nawala Checker DEBUG v3 START ===", flush=True)
     domains = load_domains()
     print(f"Domain: {domains}", flush=True)
 
@@ -164,9 +173,9 @@ def main():
 
     driver = setup_driver()
     try:
-        for batch in chunk(domains, 5):  # batch kecil untuk debug
+        for batch in chunk(domains, 3):
             check_batch(driver, batch)
-            break  # hanya 1 batch untuk debug
+            break
     except Exception as e:
         msg = f"❌ Error: {type(e).__name__} - {e}"
         print(msg, flush=True)
@@ -177,8 +186,8 @@ def main():
         except Exception:
             pass
 
-    print("=== DEBUG SELESAI — cek Deploy Logs ===", flush=True)
-    send_telegram("Debug selesai, cek Railway Deploy Logs untuk lihat struktur HTML hasil.")
+    print("=== DEBUG v3 SELESAI ===", flush=True)
+    send_telegram("Debug v3 selesai, cek Railway Deploy Logs.")
 
 
 if __name__ == "__main__":
