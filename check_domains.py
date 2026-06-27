@@ -1,23 +1,29 @@
 # check_domains.py
-# FINAL VERSION — trustpositif.id REST API (tanpa Selenium!)
-# Gratis 100 domain/hari per IP, tanpa perlu API key
+# FINAL VERSION — API Check + Bitly Auto-Update (2 links)
 #
-# Env:
+# Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
-#   DOMAINS_TO_CHECK   (pisah koma atau enter)
-# Optional:
-#   API_KEY  (isi jika punya, untuk limit lebih tinggi)
+#   DOMAINS_TO_CHECK   (pisah koma) — daftar domain cadangan
+#   BITLY_TOKEN        (API token Bitly)
+#   BITLY_LINK_ID_1    (ID link bitly pertama,  contoh: boxing-55)
+#   BITLY_LINK_ID_2    (ID link bitly kedua,    contoh: boxing55amp)
+#   BITLY_LINK_ID_3    (ID link bitly ketiga,   contoh: box55amp)
+#   API_KEY            (optional)
 
 import os
 import requests
 from time import sleep
 from typing import Dict, List, Tuple
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-DOMAINS_ENV     = os.environ.get("DOMAINS_TO_CHECK", "")
-API_KEY         = os.environ.get("API_KEY", "")  # optional
+DOMAINS_ENV      = os.environ.get("DOMAINS_TO_CHECK", "")
+BITLY_TOKEN      = os.environ.get("BITLY_TOKEN", "")
+BITLY_LINK_ID_1  = os.environ.get("BITLY_LINK_ID_1", "")
+BITLY_LINK_ID_2  = os.environ.get("BITLY_LINK_ID_2", "")
+BITLY_LINK_ID_3  = os.environ.get("BITLY_LINK_ID_3", "")
+API_KEY          = os.environ.get("API_KEY", "")
 
 API_URL = "https://trustpositif.id/api/v1/check"
 
@@ -55,52 +61,66 @@ def chunk(lst: List[str], n: int):
         yield lst[i : i + n]
 
 
-def normalize_status(blocked: bool) -> Tuple[str, str]:
-    if blocked:
-        return "🔴", "Blocked"
-    return "🟢", "Not Blocked"
-
-
 # ================= API CHECK =================
 def check_batch_api(domains: List[str]) -> Dict[str, bool]:
-    """
-    Cek batch domain via REST API trustpositif.id
-    Return dict: {domain: blocked (True/False)}
-    """
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["X-API-Key"] = API_KEY
 
     payload = {"domains": "\n".join(domains)}
-
     print(f"[API] Mengecek {len(domains)} domain...", flush=True)
+
+    resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+
+    results = {}
+    for item in data.get("results", []):
+        domain = item.get("Domain", "").lower().strip()
+        blocked = item.get("Blocked", False)
+        if domain:
+            results[domain] = blocked
+            status = "BLOCKED" if blocked else "OK"
+            print(f"    {domain}: {status}", flush=True)
+    return results
+
+
+# ================= BITLY =================
+def update_bitly(link_id: str, new_url: str) -> bool:
+    """Update destination URL bitly ke domain baru."""
+    if not link_id:
+        return False
+    url = f"https://api-ssl.bitly.com/v4/bitlinks/bit.ly/{link_id}"
+    headers = {
+        "Authorization": f"Bearer {BITLY_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {"long_url": f"https://{new_url}"}
     try:
-        resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
+        resp = requests.patch(url, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        print(f"[API] Response: success={data.get('success')}, count={data.get('count')}", flush=True)
-
-        results = {}
-        for item in data.get("results", []):
-            domain = item.get("Domain", "").lower().strip()
-            blocked = item.get("Blocked", False)
-            if domain:
-                results[domain] = blocked
-                status = "BLOCKED" if blocked else "OK"
-                print(f"    {domain}: {status}", flush=True)
-        return results
-
-    except requests.HTTPError as e:
-        print(f"[API] HTTP Error: {e.response.status_code} - {e.response.text}", flush=True)
-        raise
+        print(f"[Bitly] bit.ly/{link_id} → https://{new_url}", flush=True)
+        return True
     except Exception as e:
-        print(f"[API] Error: {type(e).__name__} - {e}", flush=True)
-        raise
+        print(f"[Bitly] Gagal update bit.ly/{link_id}: {e}", flush=True)
+        return False
+
+
+def update_all_bitly_links(active_domain: str) -> List[str]:
+    """Update semua bitly links ke domain aktif. Return list link yang berhasil."""
+    updated = []
+    for link_id in [BITLY_LINK_ID_1, BITLY_LINK_ID_2, BITLY_LINK_ID_3]:
+        if link_id:
+            ok = update_bitly(link_id, active_domain)
+            if ok:
+                updated.append(f"bit.ly/{link_id}")
+            sleep(1)  # jaga rate limit Bitly
+    return updated
 
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker START (API Mode) ===", flush=True)
+    print("=== Nawala Checker + Bitly Auto-Update START ===", flush=True)
     domains = load_domains()
     print(f"Total domain: {len(domains)}", flush=True)
 
@@ -108,40 +128,56 @@ def main():
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
+    # Cek semua domain
     all_results: Dict[str, bool] = {}
-
-    # API gratis limit 10 call/menit, batch max ~10 domain per call agar aman
     for i, batch in enumerate(chunk(domains, 10)):
         try:
             res = check_batch_api(batch)
             all_results.update(res)
         except Exception as e:
-            msg = f"❌ Error batch {i+1}: {type(e).__name__} - {e}"
+            msg = f"❌ Error cek domain: {type(e).__name__} - {e}"
             print(msg, flush=True)
             send_telegram(msg)
             return
         if i > 0:
-            sleep(6)  # jaga rate limit 10 call/menit
+            sleep(6)
 
-    # Susun laporan
-    lines = ["📊 Domain Status Report (trustpositif.id)"]
-    blocked_list = []
-    ok_list = []
+    # Pisahkan domain aman vs diblokir
+    safe_domains    = [d for d in domains if not all_results.get(d, False)]
+    blocked_domains = [d for d in domains if all_results.get(d, False)]
 
+    print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
+
+    # Update semua Bitly ke domain aman pertama
+    updated_links = []
+    new_active_domain = ""
+
+    if BITLY_TOKEN and safe_domains:
+        new_active_domain = safe_domains[0]
+        updated_links = update_all_bitly_links(new_active_domain)
+
+    # Susun laporan Telegram
+    lines = ["📊 Domain Status Report"]
     for d in domains:
         blocked = all_results.get(d, None)
         if blocked is None:
-            lines.append(f"{d}: ⚪ Tidak ada data")
+            lines.append(f"⚪ {d}: Tidak ada data")
         elif blocked:
-            emoji, label = normalize_status(True)
-            lines.append(f"{d}: {emoji} {label}")
-            blocked_list.append(d)
+            lines.append(f"🔴 {d}: Blocked")
         else:
-            emoji, label = normalize_status(False)
-            lines.append(f"{d}: {emoji} {label}")
-            ok_list.append(d)
+            lines.append(f"🟢 {d}: Aman")
 
-    lines.append(f"\n✅ Aman: {len(ok_list)} | 🔴 Diblokir: {len(blocked_list)}")
+    lines.append("")
+    lines.append(f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}")
+
+    if updated_links:
+        lines.append(f"\n🔗 Bitly diupdate ke: {new_active_domain}")
+        for link in updated_links:
+            lines.append(f"   • {link}")
+    elif blocked_domains and not safe_domains:
+        lines.append("\n🚨 SEMUA DOMAIN DIBLOKIR! Tambah domain cadangan baru.")
+    elif not BITLY_TOKEN:
+        lines.append("\n⚠️ BITLY_TOKEN belum diset di Railway Variables.")
 
     report = "\n".join(lines)
     print(report, flush=True)
@@ -150,4 +186,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()c
