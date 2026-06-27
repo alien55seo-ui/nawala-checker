@@ -1,29 +1,31 @@
 # check_domains.py
-# FINAL VERSION — API Check + Cloudflare KV Auto-Update
+# FINAL VERSION — API Check + Cloudflare KV (2 tombol: daftar & login)
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
-#   DOMAINS_TO_CHECK   (pisah koma) — daftar domain cadangan
-#   CF_API_TOKEN       (Cloudflare API Token)
-#   CF_ACCOUNT_ID      (Cloudflare Account ID)
-#   CF_KV_NAMESPACE_ID (Cloudflare KV Namespace ID)
-#   CF_KV_KEY          (key di KV, contoh: boxing55) — isi sesuai group
-#   API_KEY            (optional, API key trustpositif.id)
+#   DOMAINS_TO_CHECK     (pisah koma) — daftar domain cadangan
+#   CF_API_TOKEN         (Cloudflare API Token)
+#   CF_ACCOUNT_ID        (Cloudflare Account ID)
+#   CF_KV_NAMESPACE_ID   (Cloudflare KV Namespace ID)
+#   CF_KV_KEY_DAFTAR     (key KV untuk tombol DAFTAR, contoh: boxing55-daftar)
+#   CF_KV_KEY_LOGIN      (key KV untuk tombol LOGIN,  contoh: boxing55-login)
+#   API_KEY              (optional)
 
 import os
 import requests
 from time import sleep
 from typing import Dict, List, Tuple
 
-TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-DOMAINS_ENV        = os.environ.get("DOMAINS_TO_CHECK", "")
-CF_API_TOKEN       = os.environ.get("CF_API_TOKEN", "")
-CF_ACCOUNT_ID      = os.environ.get("CF_ACCOUNT_ID", "")
-CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID", "")
-CF_KV_KEY          = os.environ.get("CF_KV_KEY", "")
-API_KEY            = os.environ.get("API_KEY", "")
+TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
+DOMAINS_ENV         = os.environ.get("DOMAINS_TO_CHECK", "")
+CF_API_TOKEN        = os.environ.get("CF_API_TOKEN", "")
+CF_ACCOUNT_ID       = os.environ.get("CF_ACCOUNT_ID", "")
+CF_KV_NAMESPACE_ID  = os.environ.get("CF_KV_NAMESPACE_ID", "")
+CF_KV_KEY_DAFTAR    = os.environ.get("CF_KV_KEY_DAFTAR", "")
+CF_KV_KEY_LOGIN     = os.environ.get("CF_KV_KEY_LOGIN", "")
+API_KEY             = os.environ.get("API_KEY", "")
 
 API_URL = "https://trustpositif.id/api/v1/check"
 
@@ -87,7 +89,6 @@ def check_batch_api(domains: List[str]) -> Dict[str, bool]:
 
 # ================= CLOUDFLARE KV =================
 def update_cloudflare_kv(key: str, value: str) -> bool:
-    """Update KV Cloudflare dengan domain aktif."""
     if not CF_API_TOKEN or not CF_ACCOUNT_ID or not CF_KV_NAMESPACE_ID:
         print("[CF] Cloudflare env belum lengkap!", flush=True)
         return False
@@ -114,7 +115,7 @@ def update_cloudflare_kv(key: str, value: str) -> bool:
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker + Cloudflare KV START ===", flush=True)
+    print("=== Nawala Checker + Cloudflare KV (2 tombol) START ===", flush=True)
     domains = load_domains()
     print(f"Total domain: {len(domains)}", flush=True)
 
@@ -141,15 +142,20 @@ def main():
 
     print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
 
-    # Update Cloudflare KV
-    kv_updated = False
-    new_active_domain = ""
+    # Pilih domain untuk tombol DAFTAR (domain aman ke-1)
+    # Pilih domain untuk tombol LOGIN  (domain aman ke-2, berbeda dari DAFTAR)
+    domain_daftar = safe_domains[0] if len(safe_domains) >= 1 else None
+    domain_login  = safe_domains[1] if len(safe_domains) >= 2 else safe_domains[0] if safe_domains else None
 
-    if safe_domains and CF_KV_KEY:
-        new_active_domain = safe_domains[0]
-        kv_updated = update_cloudflare_kv(CF_KV_KEY, new_active_domain)
-    elif not CF_KV_KEY:
-        print("[CF] CF_KV_KEY belum diset!", flush=True)
+    # Update KV
+    kv_daftar_ok = False
+    kv_login_ok  = False
+
+    if domain_daftar and CF_KV_KEY_DAFTAR:
+        kv_daftar_ok = update_cloudflare_kv(CF_KV_KEY_DAFTAR, domain_daftar)
+
+    if domain_login and CF_KV_KEY_LOGIN:
+        kv_login_ok = update_cloudflare_kv(CF_KV_KEY_LOGIN, domain_login)
 
     # Susun laporan
     lines = ["📊 Domain Status Report"]
@@ -165,12 +171,14 @@ def main():
     lines.append("")
     lines.append(f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}")
 
-    if kv_updated:
-        lines.append(f"\n🔗 Redirect aktif: {new_active_domain}")
+    if kv_daftar_ok or kv_login_ok:
+        lines.append("")
+        if kv_daftar_ok:
+            lines.append(f"🔵 DAFTAR → {domain_daftar}")
+        if kv_login_ok:
+            lines.append(f"🟡 LOGIN  → {domain_login}")
     elif blocked_domains and not safe_domains:
         lines.append("\n🚨 SEMUA DOMAIN DIBLOKIR! Tambah domain cadangan baru.")
-    elif not CF_KV_KEY:
-        lines.append("\n⚠️ CF_KV_KEY belum diset di Railway Variables.")
 
     report = "\n".join(lines)
     print(report, flush=True)
