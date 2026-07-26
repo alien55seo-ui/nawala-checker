@@ -1,5 +1,6 @@
 # check_domains.py
-# FINAL VERSION — API Check + Retry + Cloudflare KV (2 tombol)
+# FINAL VERSION — DNS Check langsung (tanpa API, tanpa limit!)
+# + Cloudflare KV Auto-Update (2 tombol: daftar & login)
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
@@ -10,9 +11,9 @@
 #   CF_KV_NAMESPACE_ID
 #   CF_KV_KEY_DAFTAR
 #   CF_KV_KEY_LOGIN
-#   API_KEY              (optional)
 
 import os
+import socket
 import requests
 from time import sleep
 from typing import Dict, List, Tuple
@@ -25,11 +26,23 @@ CF_ACCOUNT_ID       = os.environ.get("CF_ACCOUNT_ID", "")
 CF_KV_NAMESPACE_ID  = os.environ.get("CF_KV_NAMESPACE_ID", "")
 CF_KV_KEY_DAFTAR    = os.environ.get("CF_KV_KEY_DAFTAR", "")
 CF_KV_KEY_LOGIN     = os.environ.get("CF_KV_KEY_LOGIN", "")
-API_KEY             = os.environ.get("API_KEY", "")
 
-API_URL    = "https://trustpositif.id/api/v1/check"
-MAX_RETRY  = 3   # berapa kali coba ulang kalau API error
-RETRY_WAIT = 10  # detik antara retry
+# Server DNS Nawala & Komdigi (resmi pemerintah)
+DNS_SERVERS = [
+    "180.131.144.144",  # Nawala primary
+    "180.131.145.145",  # Nawala secondary
+    "103.155.26.28",    # Komdigi primary
+]
+
+# IP halaman blokir — kalau DNS return IP ini = domain diblokir
+BLOCK_IPS = {
+    "180.131.144.144",
+    "180.131.145.145",
+    "103.155.26.28",
+    "103.155.26.29",
+    "36.86.63.185",
+    "114.0.0.0",
+}
 
 
 # ================= TELEGRAM =================
@@ -65,50 +78,61 @@ def chunk(lst: List[str], n: int):
         yield lst[i : i + n]
 
 
-# ================= API CHECK (dengan retry) =================
-def check_batch_api(domains: List[str]) -> Dict[str, bool]:
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["X-API-Key"] = API_KEY
+# ================= DNS CHECK =================
+def check_domain_dns(domain: str) -> bool:
+    """
+    Cek domain via DNS langsung ke server Nawala & Komdigi.
+    Return True kalau diblokir, False kalau aman.
+    """
+    try:
+        import dns.resolver
 
-    payload = {"domains": "\n".join(domains)}
+        for dns_server in DNS_SERVERS:
+            try:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [dns_server]
+                resolver.timeout = 5
+                resolver.lifetime = 5
 
-    for attempt in range(1, MAX_RETRY + 1):
+                answers = resolver.resolve(domain, 'A')
+                for rdata in answers:
+                    ip = str(rdata)
+                    if ip in BLOCK_IPS:
+                        print(f"    {domain}: BLOCKED (via {dns_server} → {ip})", flush=True)
+                        return True
+
+            except dns.resolver.NXDOMAIN:
+                # Domain tidak ada di DNS — anggap aman
+                continue
+            except Exception as e:
+                print(f"    {domain}: DNS error ({dns_server}): {e}", flush=True)
+                continue
+
+        return False  # Tidak ada server yang return IP blokir = aman
+
+    except ImportError:
+        # Fallback kalau dnspython tidak tersedia
+        print("    [WARNING] dnspython tidak tersedia, pakai socket fallback", flush=True)
         try:
-            print(f"[API] Attempt {attempt}/{MAX_RETRY} — mengecek {len(domains)} domain...", flush=True)
-            resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
+            ip = socket.gethostbyname(domain)
+            if ip in BLOCK_IPS:
+                print(f"    {domain}: BLOCKED (socket → {ip})", flush=True)
+                return True
+            return False
+        except Exception:
+            return False
 
-            # Kalau 429 (rate limit) atau 5xx (server error) — retry
-            if resp.status_code == 429:
-                print(f"[API] Rate limit (429), tunggu {RETRY_WAIT}s...", flush=True)
-                sleep(RETRY_WAIT)
-                continue
-            if resp.status_code >= 500:
-                print(f"[API] Server error ({resp.status_code}), tunggu {RETRY_WAIT}s...", flush=True)
-                sleep(RETRY_WAIT)
-                continue
 
-            resp.raise_for_status()
-            data = resp.json()
-
-            results = {}
-            for item in data.get("results", []):
-                domain = item.get("Domain", "").lower().strip()
-                blocked = item.get("Blocked", False)
-                if domain:
-                    results[domain] = blocked
-                    status = "BLOCKED" if blocked else "OK"
-                    print(f"    {domain}: {status}", flush=True)
-            return results
-
-        except requests.RequestException as e:
-            print(f"[API] Error: {e}", flush=True)
-            if attempt < MAX_RETRY:
-                print(f"[API] Retry dalam {RETRY_WAIT}s...", flush=True)
-                sleep(RETRY_WAIT)
-
-    # Semua retry gagal
-    raise RuntimeError(f"API gagal setelah {MAX_RETRY} percobaan")
+def check_domains_dns(domains: List[str]) -> Dict[str, bool]:
+    """Cek semua domain via DNS. Return dict {domain: blocked}."""
+    results = {}
+    for domain in domains:
+        blocked = check_domain_dns(domain)
+        results[domain] = blocked
+        if not blocked:
+            print(f"    {domain}: OK", flush=True)
+        sleep(0.5)  # jeda kecil antar domain
+    return results
 
 
 # ================= CLOUDFLARE KV =================
@@ -139,7 +163,7 @@ def update_cloudflare_kv(key: str, value: str) -> bool:
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker START ===", flush=True)
+    print("=== Nawala Checker (DNS Mode) START ===", flush=True)
     domains = load_domains()
     print(f"Total domain: {len(domains)}", flush=True)
 
@@ -147,30 +171,20 @@ def main():
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
-    # Cek semua domain dengan retry
-    all_results: Dict[str, bool] = {}
-    for i, batch in enumerate(chunk(domains, 10)):
-        try:
-            res = check_batch_api(batch)
-            all_results.update(res)
-        except RuntimeError as e:
-            # API benar-benar down — jangan update KV, biarkan domain lama tetap aktif
-            msg = f"⚠️ API trustpositif.id tidak tersedia saat ini. Domain redirect tidak diubah."
-            print(msg, flush=True)
-            send_telegram(msg)
-            return
-        if i > 0:
-            sleep(6)
+    # Cek semua domain via DNS
+    print("[DNS] Mengecek domain via server Nawala & Komdigi...", flush=True)
+    all_results = check_domains_dns(domains)
 
     safe_domains    = [d for d in domains if not all_results.get(d, False)]
     blocked_domains = [d for d in domains if all_results.get(d, False)]
 
     print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
 
-    # Update KV hanya kalau ada domain aman
+    # Pilih domain untuk DAFTAR (ke-1) dan LOGIN (ke-2)
     domain_daftar = safe_domains[0] if len(safe_domains) >= 1 else None
     domain_login  = safe_domains[1] if len(safe_domains) >= 2 else safe_domains[0] if safe_domains else None
 
+    # Update Cloudflare KV
     kv_daftar_ok = False
     kv_login_ok  = False
 
@@ -179,7 +193,7 @@ def main():
     if domain_login and CF_KV_KEY_LOGIN:
         kv_login_ok = update_cloudflare_kv(CF_KV_KEY_LOGIN, domain_login)
 
-    # Susun laporan
+    # Susun laporan Telegram
     lines = ["📊 Domain Status Report"]
     for d in domains:
         blocked = all_results.get(d, False)
