@@ -1,15 +1,15 @@
 # check_domains.py
-# FINAL VERSION — API Check + Cloudflare KV (2 tombol: daftar & login)
+# FINAL VERSION — API Check + Retry + Cloudflare KV (2 tombol)
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
-#   DOMAINS_TO_CHECK     (pisah koma) — daftar domain cadangan
-#   CF_API_TOKEN         (Cloudflare API Token)
-#   CF_ACCOUNT_ID        (Cloudflare Account ID)
-#   CF_KV_NAMESPACE_ID   (Cloudflare KV Namespace ID)
-#   CF_KV_KEY_DAFTAR     (key KV untuk tombol DAFTAR, contoh: boxing55-daftar)
-#   CF_KV_KEY_LOGIN      (key KV untuk tombol LOGIN,  contoh: boxing55-login)
+#   DOMAINS_TO_CHECK     (pisah koma)
+#   CF_API_TOKEN
+#   CF_ACCOUNT_ID
+#   CF_KV_NAMESPACE_ID
+#   CF_KV_KEY_DAFTAR
+#   CF_KV_KEY_LOGIN
 #   API_KEY              (optional)
 
 import os
@@ -27,7 +27,9 @@ CF_KV_KEY_DAFTAR    = os.environ.get("CF_KV_KEY_DAFTAR", "")
 CF_KV_KEY_LOGIN     = os.environ.get("CF_KV_KEY_LOGIN", "")
 API_KEY             = os.environ.get("API_KEY", "")
 
-API_URL = "https://trustpositif.id/api/v1/check"
+API_URL    = "https://trustpositif.id/api/v1/check"
+MAX_RETRY  = 3   # berapa kali coba ulang kalau API error
+RETRY_WAIT = 10  # detik antara retry
 
 
 # ================= TELEGRAM =================
@@ -63,28 +65,50 @@ def chunk(lst: List[str], n: int):
         yield lst[i : i + n]
 
 
-# ================= API CHECK =================
+# ================= API CHECK (dengan retry) =================
 def check_batch_api(domains: List[str]) -> Dict[str, bool]:
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["X-API-Key"] = API_KEY
 
     payload = {"domains": "\n".join(domains)}
-    print(f"[API] Mengecek {len(domains)} domain...", flush=True)
 
-    resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            print(f"[API] Attempt {attempt}/{MAX_RETRY} — mengecek {len(domains)} domain...", flush=True)
+            resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
 
-    results = {}
-    for item in data.get("results", []):
-        domain = item.get("Domain", "").lower().strip()
-        blocked = item.get("Blocked", False)
-        if domain:
-            results[domain] = blocked
-            status = "BLOCKED" if blocked else "OK"
-            print(f"    {domain}: {status}", flush=True)
-    return results
+            # Kalau 429 (rate limit) atau 5xx (server error) — retry
+            if resp.status_code == 429:
+                print(f"[API] Rate limit (429), tunggu {RETRY_WAIT}s...", flush=True)
+                sleep(RETRY_WAIT)
+                continue
+            if resp.status_code >= 500:
+                print(f"[API] Server error ({resp.status_code}), tunggu {RETRY_WAIT}s...", flush=True)
+                sleep(RETRY_WAIT)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = {}
+            for item in data.get("results", []):
+                domain = item.get("Domain", "").lower().strip()
+                blocked = item.get("Blocked", False)
+                if domain:
+                    results[domain] = blocked
+                    status = "BLOCKED" if blocked else "OK"
+                    print(f"    {domain}: {status}", flush=True)
+            return results
+
+        except requests.RequestException as e:
+            print(f"[API] Error: {e}", flush=True)
+            if attempt < MAX_RETRY:
+                print(f"[API] Retry dalam {RETRY_WAIT}s...", flush=True)
+                sleep(RETRY_WAIT)
+
+    # Semua retry gagal
+    raise RuntimeError(f"API gagal setelah {MAX_RETRY} percobaan")
 
 
 # ================= CLOUDFLARE KV =================
@@ -115,7 +139,7 @@ def update_cloudflare_kv(key: str, value: str) -> bool:
 
 # ================= MAIN =================
 def main():
-    print("=== Nawala Checker + Cloudflare KV (2 tombol) START ===", flush=True)
+    print("=== Nawala Checker START ===", flush=True)
     domains = load_domains()
     print(f"Total domain: {len(domains)}", flush=True)
 
@@ -123,14 +147,15 @@ def main():
         send_telegram("Tidak ada domain untuk dicek.")
         return
 
-    # Cek semua domain
+    # Cek semua domain dengan retry
     all_results: Dict[str, bool] = {}
     for i, batch in enumerate(chunk(domains, 10)):
         try:
             res = check_batch_api(batch)
             all_results.update(res)
-        except Exception as e:
-            msg = f"❌ Error cek domain: {type(e).__name__} - {e}"
+        except RuntimeError as e:
+            # API benar-benar down — jangan update KV, biarkan domain lama tetap aktif
+            msg = f"⚠️ API trustpositif.id tidak tersedia saat ini. Domain redirect tidak diubah."
             print(msg, flush=True)
             send_telegram(msg)
             return
@@ -142,31 +167,23 @@ def main():
 
     print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
 
-    # Pilih domain untuk tombol DAFTAR (domain aman ke-1)
-    # Pilih domain untuk tombol LOGIN  (domain aman ke-2, berbeda dari DAFTAR)
+    # Update KV hanya kalau ada domain aman
     domain_daftar = safe_domains[0] if len(safe_domains) >= 1 else None
     domain_login  = safe_domains[1] if len(safe_domains) >= 2 else safe_domains[0] if safe_domains else None
 
-    # Update KV
     kv_daftar_ok = False
     kv_login_ok  = False
 
     if domain_daftar and CF_KV_KEY_DAFTAR:
         kv_daftar_ok = update_cloudflare_kv(CF_KV_KEY_DAFTAR, domain_daftar)
-
     if domain_login and CF_KV_KEY_LOGIN:
         kv_login_ok = update_cloudflare_kv(CF_KV_KEY_LOGIN, domain_login)
 
     # Susun laporan
     lines = ["📊 Domain Status Report"]
     for d in domains:
-        blocked = all_results.get(d, None)
-        if blocked is None:
-            lines.append(f"⚪ {d}: Tidak ada data")
-        elif blocked:
-            lines.append(f"🔴 {d}: Blocked")
-        else:
-            lines.append(f"🟢 {d}: Aman")
+        blocked = all_results.get(d, False)
+        lines.append(f"{'🔴' if blocked else '🟢'} {d}: {'Blocked' if blocked else 'Aman'}")
 
     lines.append("")
     lines.append(f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}")
@@ -177,7 +194,7 @@ def main():
             lines.append(f"🔵 DAFTAR → {domain_daftar}")
         if kv_login_ok:
             lines.append(f"🟡 LOGIN  → {domain_login}")
-    elif blocked_domains and not safe_domains:
+    elif not safe_domains:
         lines.append("\n🚨 SEMUA DOMAIN DIBLOKIR! Tambah domain cadangan baru.")
 
     report = "\n".join(lines)
