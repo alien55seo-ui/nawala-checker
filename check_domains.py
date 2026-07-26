@@ -121,36 +121,56 @@ def chunk(lst: List[str], n: int):
 
 
 # ================= DNS CHECK =================
-def check_domain_dns(domain: str) -> bool:
+# Status hasil cek: "blocked" | "safe" | "unknown"
+#   blocked = ada server yang balas IP halaman blokir
+#   safe    = minimal 1 server menjawab dan tidak ada tanda blokir
+#   unknown = SEMUA server gagal menjawab (timeout/refused) -> tidak bisa dipastikan
+DNS_RETRIES = 2  # jumlah percobaan ulang per server kalau timeout
+
+
+def check_domain_dns(domain: str) -> str:
     """
     Cek domain via DNS langsung ke server Nawala & Komdigi.
-    Return True kalau diblokir, False kalau aman.
+    Return "blocked" / "safe" / "unknown".
     """
     try:
         import dns.resolver
 
+        got_answer = False  # apakah ada server yang berhasil menjawab (apapun isinya)
+
         for dns_server in DNS_SERVERS:
-            try:
-                resolver = dns.resolver.Resolver()
-                resolver.nameservers = [dns_server]
-                resolver.timeout = 5
-                resolver.lifetime = 5
+            for attempt in range(1, DNS_RETRIES + 1):
+                try:
+                    resolver = dns.resolver.Resolver()
+                    resolver.nameservers = [dns_server]
+                    resolver.timeout = 5
+                    resolver.lifetime = 5
 
-                answers = resolver.resolve(domain, 'A')
-                for rdata in answers:
-                    ip = str(rdata)
-                    if ip in BLOCK_IPS:
-                        print(f"    {domain}: BLOCKED (via {dns_server} → {ip})", flush=True)
-                        return True
+                    answers = resolver.resolve(domain, 'A')
+                    got_answer = True
+                    for rdata in answers:
+                        ip = str(rdata)
+                        if ip in BLOCK_IPS:
+                            print(f"    {domain}: BLOCKED (via {dns_server} → {ip})", flush=True)
+                            return "blocked"
+                    break  # server menjawab & tidak blokir -> lanjut ke server berikutnya
 
-            except dns.resolver.NXDOMAIN:
-                # Domain tidak ada di DNS — anggap aman
-                continue
-            except Exception as e:
-                print(f"    {domain}: DNS error ({dns_server}): {e}", flush=True)
-                continue
+                except dns.resolver.NXDOMAIN:
+                    # Domain tidak ada di DNS -> server menjawab, dianggap aman
+                    got_answer = True
+                    break
+                except dns.resolver.NoAnswer:
+                    # Server menjawab tapi tanpa record A -> tetap dihitung "menjawab"
+                    got_answer = True
+                    break
+                except Exception as e:
+                    print(f"    {domain}: DNS error ({dns_server}) percobaan {attempt}/{DNS_RETRIES}: {e}", flush=True)
+                    sleep(0.5)
+                    continue  # coba lagi server yang sama
 
-        return False  # Tidak ada server yang return IP blokir = aman
+        if got_answer:
+            return "safe"   # ada server menjawab, tidak ada tanda blokir
+        return "unknown"    # tidak ada satu pun server yang menjawab
 
     except ImportError:
         # Fallback kalau dnspython tidak tersedia
@@ -159,20 +179,22 @@ def check_domain_dns(domain: str) -> bool:
             ip = socket.gethostbyname(domain)
             if ip in BLOCK_IPS:
                 print(f"    {domain}: BLOCKED (socket → {ip})", flush=True)
-                return True
-            return False
+                return "blocked"
+            return "safe"
         except Exception:
-            return False
+            return "unknown"
 
 
-def check_domains_dns(domains: List[str]) -> Dict[str, bool]:
-    """Cek semua domain via DNS. Return dict {domain: blocked}."""
+def check_domains_dns(domains: List[str]) -> Dict[str, str]:
+    """Cek semua domain via DNS. Return dict {domain: status}."""
     results = {}
     for domain in domains:
-        blocked = check_domain_dns(domain)
-        results[domain] = blocked
-        if not blocked:
+        status = check_domain_dns(domain)
+        results[domain] = status
+        if status == "safe":
             print(f"    {domain}: OK", flush=True)
+        elif status == "unknown":
+            print(f"    {domain}: UNKNOWN (semua server DNS gagal menjawab)", flush=True)
         sleep(0.5)  # jeda kecil antar domain
     return results
 
@@ -217,12 +239,14 @@ def main():
     print("[DNS] Mengecek domain via server Nawala & Komdigi...", flush=True)
     all_results = check_domains_dns(domains)
 
-    safe_domains    = [d for d in domains if not all_results.get(d, False)]
-    blocked_domains = [d for d in domains if all_results.get(d, False)]
+    safe_domains    = [d for d in domains if all_results.get(d) == "safe"]
+    blocked_domains = [d for d in domains if all_results.get(d) == "blocked"]
+    unknown_domains = [d for d in domains if all_results.get(d) == "unknown"]
 
-    print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)}", flush=True)
+    print(f"Aman: {len(safe_domains)} | Diblokir: {len(blocked_domains)} | Tidak yakin: {len(unknown_domains)}", flush=True)
 
     # Pilih domain untuk DAFTAR (ke-1) dan LOGIN (ke-2)
+    # Hanya dari domain yang PASTI aman (bukan yang "tidak yakin")
     domain_daftar = safe_domains[0] if len(safe_domains) >= 1 else None
     domain_login  = safe_domains[1] if len(safe_domains) >= 2 else safe_domains[0] if safe_domains else None
 
@@ -236,13 +260,22 @@ def main():
         kv_login_ok = update_cloudflare_kv(CF_KV_KEY_LOGIN, domain_login)
 
     # Susun laporan Telegram
+    ICON = {"blocked": "🔴", "safe": "🟢", "unknown": "⚠️"}
+    LABEL = {"blocked": "Blocked", "safe": "Aman", "unknown": "Tidak yakin (DNS timeout)"}
     lines = ["📊 Domain Status Report"]
     for d in domains:
-        blocked = all_results.get(d, False)
-        lines.append(f"{'🔴' if blocked else '🟢'} {d}: {'Blocked' if blocked else 'Aman'}")
+        st = all_results.get(d, "unknown")
+        lines.append(f"{ICON[st]} {d}: {LABEL[st]}")
 
     lines.append("")
-    lines.append(f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}")
+    summary = f"✅ Aman: {len(safe_domains)} | 🔴 Diblokir: {len(blocked_domains)}"
+    if unknown_domains:
+        summary += f" | ⚠️ Tidak yakin: {len(unknown_domains)}"
+    lines.append(summary)
+
+    if unknown_domains:
+        lines.append("")
+        lines.append("⚠️ Server DNS Nawala tidak menjawab untuk sebagian domain — cek manual: " + ", ".join(unknown_domains))
 
     if kv_daftar_ok or kv_login_ok:
         lines.append("")
@@ -251,7 +284,7 @@ def main():
         if kv_login_ok:
             lines.append(f"🟡 LOGIN  → {domain_login}")
     elif not safe_domains:
-        lines.append("\n🚨 SEMUA DOMAIN DIBLOKIR! Tambah domain cadangan baru.")
+        lines.append("\n🚨 TIDAK ADA DOMAIN AMAN! Tambah domain cadangan baru.")
 
     report = "\n".join(lines)
     print(report, flush=True)
