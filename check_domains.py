@@ -1,18 +1,17 @@
 # check_domains.py
 # VERSI API — Cek status blokir lewat API RESMI Trust Positif (Kominfo)
 # Hasil sama persis dengan website trustpositif.id (bukan lagi tebak-tebakan DNS).
-# + Daftar domain dibaca dari Cloudflare KV (dikelola via bot Telegram /add /del)
+# + Daftar domain diambil langsung dari env DOMAINS_TO_CHECK (Railway)
 # + Cloudflare KV Auto-Update tombol DAFTAR & LOGIN
 #
 # Env Variables di Railway:
 #   TELEGRAM_TOKEN
 #   TELEGRAM_CHAT_ID
-#   DOMAINS_TO_CHECK           (fallback, pisah koma)
+#   DOMAINS_TO_CHECK           (WAJIB — daftar domain, pisah koma/newline)
 #   TRUSTPOSITIF_API_KEY       (opsional — tp_xxx; tanpa key tetap jalan mode freemium)
 #   CF_API_TOKEN
 #   CF_ACCOUNT_ID
 #   CF_KV_NAMESPACE_ID
-#   CF_KV_DOMAINS_NAMESPACE_ID (opsional — namespace KV daftar domain; default CF_KV_NAMESPACE_ID)
 #   CF_KV_KEY_DAFTAR
 #   CF_KV_KEY_LOGIN
 
@@ -29,7 +28,6 @@ TP_API_KEY          = os.environ.get("TRUSTPOSITIF_API_KEY", "")
 CF_API_TOKEN        = os.environ.get("CF_API_TOKEN", "")
 CF_ACCOUNT_ID       = os.environ.get("CF_ACCOUNT_ID", "")
 CF_KV_NAMESPACE_ID  = os.environ.get("CF_KV_NAMESPACE_ID", "")
-CF_KV_DOMAINS_NS_ID = os.environ.get("CF_KV_DOMAINS_NAMESPACE_ID", "") or os.environ.get("CF_KV_NAMESPACE_ID", "")
 CF_KV_KEY_DAFTAR    = os.environ.get("CF_KV_KEY_DAFTAR", "")
 CF_KV_KEY_LOGIN     = os.environ.get("CF_KV_KEY_LOGIN", "")
 
@@ -61,42 +59,12 @@ def _clean_list(parts: List[str]) -> List[str]:
     return out
 
 
-def load_domains_from_kv() -> List[str]:
-    """Baca daftar domain dari Cloudflare KV (key: domains:<chat_id>),
-    yang diisi oleh bot manager Telegram lewat /add dan /del."""
-    if not CF_API_TOKEN or not CF_ACCOUNT_ID or not CF_KV_DOMAINS_NS_ID or not TELEGRAM_CHAT_ID:
-        return []
-    key = f"domains:{TELEGRAM_CHAT_ID}"
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_DOMAINS_NS_ID}/values/{key}"
-    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code == 404:
-            print(f"[KV] key {key} belum ada (belum pernah /add) — pakai fallback env", flush=True)
-            return []
-        resp.raise_for_status()
-        raw = resp.text.strip()
-        try:
-            data = json.loads(raw)
-            if isinstance(data, list):
-                return _clean_list(data)
-        except json.JSONDecodeError:
-            pass
-        return _clean_list(raw.replace("\n", ",").split(","))
-    except Exception as e:
-        print(f"[KV] Gagal baca daftar domain: {type(e).__name__} - {e}", flush=True)
-        return []
-
-
 def load_domains() -> List[str]:
-    kv_domains = load_domains_from_kv()
-    if kv_domains:
-        print(f"[KV] Daftar domain dari KV: {len(kv_domains)} domain", flush=True)
-        return kv_domains
+    """Daftar domain diambil langsung dari env DOMAINS_TO_CHECK (Railway)."""
     raw = (DOMAINS_ENV or "").strip()
     if not raw:
         return []
-    print("[ENV] Pakai daftar domain dari env DOMAINS_TO_CHECK (fallback)", flush=True)
+    print("[ENV] Daftar domain dari DOMAINS_TO_CHECK (Railway)", flush=True)
     return _clean_list(raw.replace("\n", ",").split(","))
 
 
